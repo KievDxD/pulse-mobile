@@ -36,6 +36,8 @@ export default function TabsLayout() {
             height: 58 + bottomInset,
             paddingTop: 6,
             paddingBottom: bottomInset,
+            paddingLeft: layout.insets.left,
+            paddingRight: layout.insets.right,
           },
           tabBarItemStyle: {
             minHeight: layout.minTouchTarget,

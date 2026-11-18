@@ -1,51 +1,53 @@
-import {
-  authenticateWithBiometrics,
-  authenticateWithPin,
-  clearAuthSession,
-  DEFAULT_PIN,
-  getStoredAuthSession,
-  inspectBiometricHardware,
-  instantDemoUnlock,
-} from '../src/services/biometricAuth';
+import * as biometricAuth from '../src/services/biometricAuth';
 
-describe('Biometric & PIN Security Service', () => {
+describe('Real Biometric & SecureStore PIN Service (V2.0)', () => {
   beforeEach(async () => {
-    await clearAuthSession();
+    await biometricAuth.clearAuthSession();
+    await biometricAuth.clearConfiguredPin();
+  });
+
+  it('does not expose any fake demo unlock bypass in production module', () => {
+    expect('instantDemoUnlock' in biometricAuth).toBe(false);
+    expect('DEFAULT_PIN' in biometricAuth).toBe(false);
   });
 
   it('inspects native biometric hardware and SecureStore enclave capabilities', async () => {
-    const info = await inspectBiometricHardware();
+    const info = await biometricAuth.inspectBiometricHardware();
     expect(info.hasHardware).toBe(true);
     expect(info.isEnrolled).toBe(true);
     expect(info.supportedTypes).toContain('Face ID / Facial Recognition');
     expect(info.securityLevel).toBe('CLASS_3_BIOMETRIC_STRONG');
   });
 
-  it('authenticates via native biometrics and persists encrypted session', async () => {
-    const result = await authenticateWithBiometrics();
+  it('authenticates via native biometrics and persists session in SecureStore', async () => {
+    const result = await biometricAuth.authenticateWithBiometrics();
     expect(result.success).toBe(true);
     expect(result.method).toBe('BIOMETRIC');
 
-    const session = await getStoredAuthSession();
+    const session = await biometricAuth.getStoredAuthSession();
     expect(session?.method).toBe('BIOMETRIC');
   });
 
-  it('validates fallback security PIN 2026 and rejects incorrect PINs', async () => {
-    const failed = await authenticateWithPin('9999');
-    expect(failed.success).toBe(false);
-    expect(failed.error).toContain('2026');
+  it('enforces 4-digit PIN enrollment and stores SHA-256 hashed PIN in SecureStore', async () => {
+    expect(await biometricAuth.hasConfiguredPin()).toBe(false);
 
-    const passed = await authenticateWithPin(DEFAULT_PIN);
-    expect(passed.success).toBe(true);
-    expect(passed.method).toBe('PIN');
+    const invalidSetup = await biometricAuth.configureUserPin('12');
+    expect(invalidSetup.success).toBe(false);
+
+    const validSetup = await biometricAuth.configureUserPin('4829');
+    expect(validSetup.success).toBe(true);
+    expect(validSetup.method).toBe('PIN');
+    expect(await biometricAuth.hasConfiguredPin()).toBe(true);
   });
 
-  it('grants immediate access via 1-click Instant Demo Unlock', async () => {
-    const demo = await instantDemoUnlock();
-    expect(demo.success).toBe(true);
-    expect(demo.method).toBe('DEMO_BYPASS');
+  it('verifies user-configured PIN against SecureStore hash and rejects mismatches', async () => {
+    await biometricAuth.configureUserPin('7391');
 
-    const session = await getStoredAuthSession();
-    expect(session?.method).toBe('DEMO_BYPASS');
+    const wrong = await biometricAuth.authenticateWithPin('0000');
+    expect(wrong.success).toBe(false);
+
+    const right = await biometricAuth.authenticateWithPin('7391');
+    expect(right.success).toBe(true);
+    expect(right.method).toBe('PIN');
   });
 });

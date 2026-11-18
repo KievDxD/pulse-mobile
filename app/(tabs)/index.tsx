@@ -4,6 +4,7 @@ import {
   AlertOctagon,
   CheckCircle2,
   Clock,
+  Compass,
   Plus,
   RefreshCw,
   ShieldCheck,
@@ -12,6 +13,7 @@ import {
 import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { OperationCard } from '../../src/components/OperationCard';
+import { isValidHttpEndpoint } from '../../src/services/syncClient';
 import { usePulseStore } from '../../src/store/usePulseStore';
 import { useAdaptiveLayout } from '../../src/theme/adaptive';
 import { COLORS } from '../../src/theme/colors';
@@ -23,6 +25,8 @@ export default function CommandScreen() {
 
   const operations = usePulseStore((s) => s.operations);
   const networkMode = usePulseStore((s) => s.networkMode);
+  const networkInfo = usePulseStore((s) => s.networkInfo);
+  const syncEndpointUrl = usePulseStore((s) => s.syncEndpointUrl);
   const isSyncing = usePulseStore((s) => s.isSyncing);
   const lastSyncAt = usePulseStore((s) => s.lastSyncAt);
   const syncQueue = usePulseStore((s) => s.syncQueue);
@@ -32,7 +36,7 @@ export default function CommandScreen() {
     Math.min(layout.width, layout.maxContentWidth) -
     layout.safePadding.left -
     layout.safePadding.right;
-  const [contentWidth, setContentWidth] = useState<number>(Math.max(280, estimatedWidth));
+  const [contentWidth, setContentWidth] = useState<number>(Math.max(260, estimatedWidth));
 
   const syncedOps = operations.filter((op) => op.syncStatus === 'SYNCED_CLOUD');
   const queuedOps = operations.filter(
@@ -80,9 +84,9 @@ export default function CommandScreen() {
   };
 
   const engineStateLabel = isSyncing
-    ? 'SEQUENTIAL_SYNC_IN_PROGRESS'
+    ? 'SYNC_IN_PROGRESS'
     : networkMode === 'OFFLINE'
-    ? 'OFFLINE_AIRPLANE_BUFFERING'
+    ? 'OFFLINE_BUFFERING'
     : queuedOps.length > 0
     ? 'ONLINE_PENDING_FLUSH'
     : 'ONLINE_READY';
@@ -94,6 +98,10 @@ export default function CommandScreen() {
       ? COLORS.accentBlue
       : COLORS.online;
 
+  const transportTarget = isValidHttpEndpoint(syncEndpointUrl)
+    ? `HTTP API (${syncEndpointUrl})`
+    : 'LOCAL SHA-256 TRANSACTIONAL LEDGER';
+
   const kpis = [
     {
       label: 'TOTAL OPS',
@@ -102,7 +110,7 @@ export default function CommandScreen() {
       icon: Activity,
     },
     {
-      label: 'CLOUD SYNCED',
+      label: 'REPLICATED',
       value: String(syncedOps.length),
       color: COLORS.online,
       icon: CheckCircle2,
@@ -121,13 +129,13 @@ export default function CommandScreen() {
     },
     {
       label: 'MEAN LATENCY',
-      value: `${meanLatency}ms`,
+      value: meanLatency > 0 ? `${meanLatency}ms` : '—',
       color: COLORS.textPrimary,
       icon: RefreshCw,
     },
     {
-      label: 'SHA-256 INTEGRITY',
-      value: '100%',
+      label: 'SHA-256 AUDIT',
+      value: operations.length > 0 ? 'VERIFIED' : 'READY',
       color: COLORS.online,
       icon: ShieldCheck,
     },
@@ -138,7 +146,7 @@ export default function CommandScreen() {
       style={styles.root}
       contentContainerStyle={{
         paddingTop: layout.spacing.md,
-        paddingBottom: layout.spacing.xl + 16,
+        paddingBottom: layout.scrollBottomPadding,
         paddingLeft: layout.safePadding.left,
         paddingRight: layout.safePadding.right,
       }}
@@ -152,13 +160,12 @@ export default function CommandScreen() {
           }
         }}
       >
-        {/* KPI Grid */}
         <View style={styles.sectionHeader}>
-          <Text style={[styles.sectionTitle, { fontSize: layout.typography.title }]}>
+          <Text style={[styles.sectionTitle, { fontSize: layout.typography.title }]} numberOfLines={1}>
             Operational Command
           </Text>
-          <Text style={styles.sectionMeta}>
-            {layout.columns} COL ADAPTIVE • {layout.breakpoint.toUpperCase()}
+          <Text style={styles.sectionMeta} numberOfLines={1}>
+            {layout.columns} COL • {layout.breakpoint.toUpperCase()}
           </Text>
         </View>
 
@@ -185,8 +192,9 @@ export default function CommandScreen() {
                 <Text
                   style={[
                     styles.kpiValue,
-                    { color: kpi.color, fontSize: layout.typography.hero },
+                    { color: kpi.color, fontSize: layout.typography.title },
                   ]}
+                  numberOfLines={1}
                 >
                   {kpi.value}
                 </Text>
@@ -200,7 +208,9 @@ export default function CommandScreen() {
           <View style={styles.engineTop}>
             <View style={styles.engineTitleRow}>
               <View style={[styles.engineDot, { backgroundColor: engineColor }]} />
-              <Text style={styles.engineTitle}>OFFLINE-FIRST SYNC ENGINE</Text>
+              <Text style={styles.engineTitle} numberOfLines={1}>
+                OFFLINE-FIRST SYNC ENGINE
+              </Text>
             </View>
             <View
               style={[
@@ -213,7 +223,7 @@ export default function CommandScreen() {
                 },
               ]}
             >
-              <Text style={[styles.enginePillText, { color: engineColor }]}>
+              <Text style={[styles.enginePillText, { color: engineColor }]} numberOfLines={1}>
                 {engineStateLabel}
               </Text>
             </View>
@@ -232,21 +242,25 @@ export default function CommandScreen() {
           </View>
 
           <View style={styles.engineStatsRow}>
-            <Text style={styles.engineStat}>
-              CLOUD REPLICATION: {syncedOps.length}/{operations.length} PACKETS (
-              {Math.round(syncRatio * 100)}%)
+            <Text style={styles.engineStat} numberOfLines={1}>
+              LINK: {networkInfo.type}
+              {networkInfo.ipAddress ? ` (${networkInfo.ipAddress})` : ''}
             </Text>
-            <Text style={styles.engineStat}>
-              LAST CLOUD ACK: {lastSyncAt ? lastSyncAt.slice(11, 19) + ' UTC' : 'PENDING'}
+            <Text style={styles.engineStat} numberOfLines={1}>
+              LAST ACK: {lastSyncAt ? lastSyncAt.slice(11, 19) + ' UTC' : 'NONE'}
             </Text>
           </View>
+
+          <Text style={styles.transportLine} numberOfLines={2}>
+            TARGET: {transportTarget}
+          </Text>
 
           {networkMode === 'OFFLINE' ? (
             <View style={styles.offlineCallout}>
               <WifiOff size={15} color={COLORS.offline} />
               <Text style={styles.offlineCalloutText}>
-                Airplane mode active. New field reports are signed with SHA-256 and buffered in
-                local AsyncStorage until uplink restores.
+                Device connectivity lost / Airplane Mode active. Captured reports are sealed with
+                SHA-256 and buffered locally until OS connectivity restores.
               </Text>
             </View>
           ) : null}
@@ -254,25 +268,25 @@ export default function CommandScreen() {
           <View style={[styles.ctaRow, layout.isCompact && styles.ctaColumn]}>
             <Pressable
               onPress={handleManualSync}
-              disabled={isSyncing}
+              disabled={isSyncing || queuedOps.length === 0}
               accessibilityRole="button"
-              accessibilityLabel="Sync Queue Now"
+              accessibilityLabel="Sync Pending Queue Now"
               style={({ pressed }) => [
                 styles.primaryButton,
                 {
                   minHeight: layout.minTouchTarget,
                   flex: layout.isCompact ? undefined : 1,
-                  opacity: pressed || isSyncing ? 0.8 : 1,
+                  opacity: pressed || isSyncing || queuedOps.length === 0 ? 0.65 : 1,
                 },
               ]}
             >
               <RefreshCw size={16} color={COLORS.primaryText} />
-              <Text style={styles.primaryButtonText}>
+              <Text style={styles.primaryButtonText} numberOfLines={1}>
                 {networkMode === 'OFFLINE'
-                  ? 'OFFLINE (TOGGLE HEADER TO SYNC)'
+                  ? 'OFFLINE — AUTO-SYNC ON RECONNECT'
                   : isSyncing
                   ? 'SYNCING QUEUE...'
-                  : `SYNC QUEUE NOW (${queuedOps.length})`}
+                  : `SYNC QUEUE (${queuedOps.length})`}
               </Text>
             </Pressable>
 
@@ -282,7 +296,7 @@ export default function CommandScreen() {
                 router.push('/(tabs)/capture');
               }}
               accessibilityRole="button"
-              accessibilityLabel="New Field Capture"
+              accessibilityLabel="Capture Field Report"
               style={({ pressed }) => [
                 styles.secondaryButton,
                 {
@@ -292,35 +306,74 @@ export default function CommandScreen() {
               ]}
             >
               <Plus size={16} color={COLORS.textPrimary} />
-              <Text style={styles.secondaryButtonText}>CAPTURE REPORT</Text>
+              <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                CAPTURE REPORT
+              </Text>
             </Pressable>
           </View>
         </View>
 
-        {/* Recent Field Operations Feed */}
+        {/* Field Operations Feed or Clean Empty State */}
         <View style={styles.sectionHeader}>
-          <Text style={[styles.sectionTitle, { fontSize: layout.typography.subtitle }]}>
-            Recent Field Operations
+          <Text style={[styles.sectionTitle, { fontSize: layout.typography.subtitle }]} numberOfLines={1}>
+            Field Operations Ledger
           </Text>
-          <Pressable
-            onPress={() => router.push('/(tabs)/queue')}
-            style={{ minHeight: layout.minTouchTarget, justifyContent: 'center' }}
-          >
-            <Text style={styles.linkText}>OPEN FULL AUDIT →</Text>
-          </Pressable>
+          {operations.length > 0 ? (
+            <Pressable
+              onPress={() => router.push('/(tabs)/queue')}
+              style={{ minHeight: layout.minTouchTarget, justifyContent: 'center' }}
+            >
+              <Text style={styles.linkText} numberOfLines={1}>
+                AUDIT QUEUE →
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
 
-        <View style={[styles.feedGrid, { gap: feedGap }]}>
-          {operations.map((op) => (
-            <View key={op.id} style={{ width: feedCardWidth }}>
-              <OperationCard
-                operation={op}
-                compact={layout.isCompact}
-                onRetry={handleRetryItem}
-              />
-            </View>
-          ))}
-        </View>
+        {operations.length === 0 ? (
+          <View style={[styles.emptyCard, { padding: layout.cardPadding + 8 }]}>
+            <Compass size={28} color={COLORS.textSecondary} />
+            <Text style={styles.emptyTitle}>No Field Operations Recorded</Text>
+            <Text style={styles.emptySubtitle}>
+              Your local queue and verified ledger are clean. Capture your first real inspection
+              using hardware GPS telemetry, QR camera scanning, and SHA-256 sealing.
+            </Text>
+            <Pressable
+              onPress={async () => {
+                await triggerHaptic('medium');
+                router.push('/(tabs)/capture');
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Capture First Field Report"
+              style={({ pressed }) => [
+                styles.primaryButton,
+                {
+                  minHeight: layout.minTouchTarget,
+                  paddingHorizontal: 18,
+                  marginTop: 6,
+                  opacity: pressed ? 0.85 : 1,
+                },
+              ]}
+            >
+              <Plus size={16} color={COLORS.primaryText} />
+              <Text style={styles.primaryButtonText} numberOfLines={1}>
+                CAPTURE FIRST FIELD REPORT
+              </Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={[styles.feedGrid, { gap: feedGap }]}>
+            {operations.map((op) => (
+              <View key={op.id} style={{ width: feedCardWidth }}>
+                <OperationCard
+                  operation={op}
+                  compact={layout.isCompact}
+                  onRetry={handleRetryItem}
+                />
+              </View>
+            ))}
+          </View>
+        )}
       </View>
     </ScrollView>
   );
@@ -346,12 +399,14 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontWeight: '800',
     letterSpacing: -0.3,
+    flexShrink: 1,
   },
   sectionMeta: {
     color: COLORS.textMuted,
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.6,
+    flexShrink: 0,
   },
   linkText: {
     color: COLORS.textSecondary,
@@ -380,8 +435,9 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontWeight: '800',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
     flex: 1,
+    flexShrink: 1,
   },
   kpiValue: {
     fontWeight: '800',
@@ -392,7 +448,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 12,
-    gap: 12,
+    gap: 10,
   },
   engineTop: {
     flexDirection: 'row',
@@ -405,28 +461,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flexShrink: 1,
   },
   engineDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
+    flexShrink: 0,
   },
   engineTitle: {
     color: COLORS.textPrimary,
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 0.7,
+    letterSpacing: 0.6,
+    flexShrink: 1,
   },
   enginePill: {
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 6,
     borderWidth: 1,
+    flexShrink: 1,
   },
   enginePillText: {
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   progressTrack: {
     height: 6,
@@ -448,6 +509,12 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 11,
     fontWeight: '600',
+    flexShrink: 1,
+  },
+  transportLine: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontFamily: 'monospace',
   },
   offlineCallout: {
     flexDirection: 'row',
@@ -464,6 +531,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     flex: 1,
+    flexShrink: 1,
     lineHeight: 17,
   },
   ctaRow: {
@@ -487,6 +555,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   secondaryButton: {
     flexDirection: 'row',
@@ -504,6 +573,28 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
+  },
+  emptyCard: {
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    alignItems: 'center',
+    gap: 10,
+  },
+  emptyTitle: {
+    color: COLORS.textPrimary,
+    fontSize: 16,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    maxWidth: 420,
   },
   feedGrid: {
     flexDirection: 'row',

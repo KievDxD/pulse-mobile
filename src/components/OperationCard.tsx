@@ -1,9 +1,17 @@
-import { AlertTriangle, CheckCircle2, Clock, MapPin, QrCode, RefreshCw, Shield } from 'lucide-react-native';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  MapPin,
+  QrCode,
+  RefreshCw,
+  Shield,
+} from 'lucide-react-native';
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import type { FieldOperation, PriorityLevel, SyncStatus } from '../store/usePulseStore';
 import { MIN_TOUCH_TARGET_DP } from '../theme/adaptive';
 import { COLORS } from '../theme/colors';
+import type { FieldOperation, PriorityLevel, SyncStatus } from '../types/operations';
 import { formatShortHash } from '../utils/hash';
 
 interface OperationCardProps {
@@ -40,14 +48,14 @@ function getSyncStyle(status: SyncStatus) {
   switch (status) {
     case 'SYNCED_CLOUD':
       return {
-        label: 'SYNCED_CLOUD',
+        label: 'SYNCED',
         color: COLORS.online,
         bg: COLORS.onlineBg,
         border: COLORS.onlineBorder,
       };
     case 'SYNCING':
       return {
-        label: 'SYNCING...',
+        label: 'SYNCING',
         color: COLORS.accentBlue,
         bg: COLORS.blueBg,
         border: COLORS.blueBorder,
@@ -81,18 +89,30 @@ export function OperationCard({
     Boolean(onRetry) &&
     (operation.syncStatus === 'QUEUED_LOCAL' || operation.syncStatus === 'SYNC_FAILED');
 
+  const coords = operation.coordinates;
+  const accuracyLabel =
+    typeof coords.accuracyMeters === 'number'
+      ? `±${coords.accuracyMeters.toFixed(1)}m`
+      : 'MANUAL';
+  const altitudeLabel =
+    typeof coords.altitudeMeters === 'number'
+      ? ` • ${Math.round(coords.altitudeMeters)}m ALT`
+      : '';
+
   return (
     <View style={[styles.card, { padding: compact ? 12 : 16 }]}>
       <View style={styles.topRow}>
         <View style={styles.codeGroup}>
-          <Text style={styles.codeText}>{operation.code}</Text>
+          <Text style={styles.codeText} numberOfLines={1}>
+            {operation.code}
+          </Text>
           <View
             style={[
               styles.badge,
               { backgroundColor: priorityStyle.bg, borderColor: priorityStyle.border },
             ]}
           >
-            <Text style={[styles.badgeText, { color: priorityStyle.color }]}>
+            <Text style={[styles.badgeText, { color: priorityStyle.color }]} numberOfLines={1}>
               {operation.priority}
             </Text>
           </View>
@@ -113,7 +133,9 @@ export function OperationCard({
           ) : (
             <Clock size={12} color={syncStyle.color} />
           )}
-          <Text style={[styles.badgeText, { color: syncStyle.color }]}>{syncStyle.label}</Text>
+          <Text style={[styles.badgeText, { color: syncStyle.color }]} numberOfLines={1}>
+            {syncStyle.label}
+          </Text>
         </View>
       </View>
 
@@ -128,34 +150,41 @@ export function OperationCard({
       <View style={styles.metaGrid}>
         <View style={styles.metaItem}>
           <MapPin size={13} color={COLORS.textMuted} />
-          <Text style={styles.metaText} numberOfLines={1}>
-            {operation.coordinates.latitude.toFixed(4)}, {operation.coordinates.longitude.toFixed(4)}{' '}
-            • {operation.coordinates.sector}
+          <Text style={styles.metaText} numberOfLines={2}>
+            {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} ({accuracyLabel}
+            {altitudeLabel})
           </Text>
         </View>
 
         {operation.checkpointId ? (
           <View style={styles.metaItem}>
             <QrCode size={13} color={COLORS.textMuted} />
-            <Text style={styles.metaText}>{operation.checkpointId}</Text>
+            <Text style={styles.metaText} numberOfLines={1}>
+              {operation.checkpointId}
+            </Text>
           </View>
         ) : null}
 
         <View style={styles.metaItem}>
           <Shield size={13} color={COLORS.textMuted} />
-          <Text style={styles.monoText}>
+          <Text style={styles.monoText} numberOfLines={detailed ? 2 : 1}>
             {detailed ? operation.integrityHash : formatShortHash(operation.integrityHash)}
           </Text>
         </View>
       </View>
 
       <View style={styles.footerRow}>
-        <Text style={styles.footerStat}>CAT: {operation.category}</Text>
-        <Text style={styles.footerStat}>
-          {operation.payloadBytes}B • RETRIES: {operation.retryCount}
+        <Text style={styles.footerStat} numberOfLines={1}>
+          {operation.category}
+        </Text>
+        <Text style={styles.footerStat} numberOfLines={1}>
+          {operation.payloadBytes}B • RETRY {operation.retryCount}
+          {operation.syncMode
+            ? ` • ${operation.syncMode === 'REMOTE_HTTP' ? 'HTTP' : 'LEDGER'}`
+            : ''}
         </Text>
         {typeof operation.latencyMs === 'number' ? (
-          <Text style={[styles.footerStat, { color: COLORS.online }]}>
+          <Text style={[styles.footerStat, { color: COLORS.online }]} numberOfLines={1}>
             {operation.latencyMs}ms
           </Text>
         ) : null}
@@ -179,8 +208,8 @@ export function OperationCard({
           ]}
         >
           <RefreshCw size={15} color={COLORS.primaryText} />
-          <Text style={styles.retryButtonText}>
-            {operation.syncStatus === 'SYNC_FAILED' ? 'RETRY PACKET UPLINK' : 'PUSH PACKET NOW'}
+          <Text style={styles.retryButtonText} numberOfLines={1}>
+            {operation.syncStatus === 'SYNC_FAILED' ? 'RETRY PACKET UPLINK' : 'SYNC PACKET NOW'}
           </Text>
         </Pressable>
       ) : null}
@@ -207,13 +236,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    flexShrink: 1,
   },
   codeText: {
     color: COLORS.textSecondary,
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.7,
+    letterSpacing: 0.6,
     fontVariant: ['tabular-nums'],
+    flexShrink: 1,
   },
   badge: {
     flexDirection: 'row',
@@ -223,11 +254,13 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 6,
     borderWidth: 1,
+    flexShrink: 1,
   },
   badgeText: {
     fontSize: 10,
     fontWeight: '800',
-    letterSpacing: 0.5,
+    letterSpacing: 0.4,
+    flexShrink: 1,
   },
   title: {
     color: COLORS.textPrimary,
@@ -241,7 +274,7 @@ const styles = StyleSheet.create({
   },
   metaGrid: {
     gap: 5,
-    paddingTop: 4,
+    paddingTop: 6,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
@@ -253,12 +286,14 @@ const styles = StyleSheet.create({
   metaText: {
     color: COLORS.textSecondary,
     fontSize: 12,
+    flex: 1,
     flexShrink: 1,
   },
   monoText: {
     color: COLORS.textMuted,
     fontSize: 11,
     fontFamily: 'monospace',
+    flex: 1,
     flexShrink: 1,
   },
   footerRow: {
@@ -274,6 +309,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0.4,
+    flexShrink: 1,
   },
   errorBanner: {
     flexDirection: 'row',
@@ -290,6 +326,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     flex: 1,
+    flexShrink: 1,
   },
   retryButton: {
     flexDirection: 'row',
@@ -305,6 +342,7 @@ const styles = StyleSheet.create({
     color: COLORS.primaryText,
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
+    flexShrink: 1,
   },
 });

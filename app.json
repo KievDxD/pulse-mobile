@@ -2,7 +2,7 @@
   "expo": {
     "name": "PULSE // MOBILE",
     "slug": "pulse-mobile",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "default",
     "scheme": "pulse-mobile",
     "userInterfaceStyle": "dark",
@@ -10,7 +10,9 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSFaceIDUsageDescription": "PULSE // MOBILE uses Face ID to authorize field operations and encrypted offline storage."
+        "NSFaceIDUsageDescription": "PULSE // MOBILE uses Face ID to authorize field operations and encrypted offline storage.",
+        "NSCameraUsageDescription": "PULSE // MOBILE uses the camera to scan physical QR and barcode checkpoints in the field.",
+        "NSLocationWhenInUseUsageDescription": "PULSE // MOBILE captures real GPS coordinates, altitude, and accuracy for field operations."
       }
     },
     "android": {
@@ -19,7 +21,12 @@
       },
       "permissions": [
         "USE_BIOMETRIC",
-        "USE_FINGERPRINT"
+        "USE_FINGERPRINT",
+        "CAMERA",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_NETWORK_STATE",
+        "INTERNET"
       ]
     },
     "web": {
@@ -30,7 +37,9 @@
       "expo-router",
       "expo-secure-store",
       "expo-local-authentication",
-      "expo-status-bar"
+      "expo-camera",
+      "expo-location",
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true

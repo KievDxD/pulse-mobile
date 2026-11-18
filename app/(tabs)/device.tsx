@@ -1,6 +1,9 @@
+import { Camera } from 'expo-camera';
+import * as Location from 'expo-location';
 import {
   Cpu,
   Fingerprint,
+  Globe,
   LayoutGrid,
   RotateCw,
   ShieldCheck,
@@ -8,8 +11,10 @@ import {
   Tablet,
 } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { BiometricHardwareInfo, inspectBiometricHardware } from '../../src/services/biometricAuth';
+import { getVerifiedLedgerCount, isValidHttpEndpoint } from '../../src/services/syncClient';
+import { usePulseStore } from '../../src/store/usePulseStore';
 import {
   calculateAdaptiveMetrics,
   DEVICE_PRESETS,
@@ -23,15 +28,37 @@ import { triggerHaptic } from '../../src/utils/haptics';
 export default function DeviceLabScreen() {
   const layout = useAdaptiveLayout();
 
+  const networkInfo = usePulseStore((s) => s.networkInfo);
+  const syncEndpointUrl = usePulseStore((s) => s.syncEndpointUrl);
+  const setSyncEndpointUrl = usePulseStore((s) => s.setSyncEndpointUrl);
+  const refreshNetworkStatus = usePulseStore((s) => s.refreshNetworkStatus);
+
   const [hardware, setHardware] = useState<BiometricHardwareInfo | null>(null);
+  const [gpsPerm, setGpsPerm] = useState<string>('CHECKING');
+  const [camPerm, setCamPerm] = useState<string>('CHECKING');
+  const [ledgerCount, setLedgerCount] = useState<number>(0);
+
+  const [endpointDraft, setEndpointDraft] = useState<string>(syncEndpointUrl);
+  const [endpointStatus, setEndpointStatus] = useState<string | null>(null);
+
   const [selectedPresetId, setSelectedPresetId] = useState<DevicePreset['id']>('iphone-se');
   const [simOrientation, setSimOrientation] = useState<DeviceOrientation>('portrait');
 
   useEffect(() => {
     let active = true;
-    inspectBiometricHardware().then((info) => {
-      if (active) setHardware(info);
-    });
+    void (async () => {
+      const [hw, locStatus, camStatus, count] = await Promise.all([
+        inspectBiometricHardware(),
+        Location.getForegroundPermissionsAsync().catch(() => ({ status: 'unavailable' })),
+        Camera.getCameraPermissionsAsync().catch(() => ({ status: 'unavailable' })),
+        getVerifiedLedgerCount(),
+      ]);
+      if (!active) return;
+      setHardware(hw);
+      setGpsPerm(String(locStatus.status).toUpperCase());
+      setCamPerm(String(camStatus.status).toUpperCase());
+      setLedgerCount(count);
+    })();
     return () => {
       active = false;
     };
@@ -59,6 +86,24 @@ export default function DeviceLabScreen() {
     });
   }, [selectedPreset, simOrientation, layout.clampedFontScale]);
 
+  const handleSaveEndpoint = async () => {
+    await triggerHaptic('medium');
+    const trimmed = endpointDraft.trim();
+    if (trimmed.length > 0 && !isValidHttpEndpoint(trimmed)) {
+      await triggerHaptic('error');
+      setEndpointStatus('Endpoint must start with http:// or https://, or clear to use local ledger.');
+      return;
+    }
+
+    setSyncEndpointUrl(trimmed);
+    await triggerHaptic('success');
+    setEndpointStatus(
+      trimmed.length > 0
+        ? `Configured remote HTTP sync target: ${trimmed}`
+        : 'Using SHA-256 verified local transactional ledger.'
+    );
+  };
+
   const isSplit = layout.columns >= 2;
 
   const liveMetricsRows = [
@@ -66,113 +111,190 @@ export default function DeviceLabScreen() {
     { label: 'VIEWPORT (DP)', value: `${layout.width} × ${layout.height} dp` },
     {
       label: 'BREAKPOINT',
-      value: `${layout.breakpoint.toUpperCase()} (${
-        layout.breakpoint === 'compact'
-          ? '<380dp'
-          : layout.breakpoint === 'standard'
-          ? '380–599dp'
-          : '>=600dp'
-      })`,
+      value: `${layout.breakpoint.toUpperCase()} (${layout.columns} COL)`,
     },
     { label: 'ORIENTATION', value: layout.orientation.toUpperCase() },
-    { label: 'GRID COLUMNS', value: `${layout.columns} COL` },
+    { label: 'MAX CONTENT WIDTH', value: `${layout.maxContentWidth} dp` },
     { label: 'MIN TOUCH TARGET', value: `${layout.minTouchTarget} × ${layout.minTouchTarget} dp` },
-    { label: 'FONT SCALE (CLAMPED)', value: `${layout.clampedFontScale}x` },
+    { label: 'FONT SCALE', value: `${layout.clampedFontScale}x` },
     {
       label: 'SAFE AREA INSETS',
-      value: `T:${layout.insets.top} B:${layout.insets.bottom} L:${layout.insets.left} R:${layout.insets.right} dp`,
+      value: `T:${layout.insets.top} B:${layout.insets.bottom} L:${layout.insets.left} R:${layout.insets.right}`,
     },
+    {
+      label: 'REAL NETWORK',
+      value: `${networkInfo.type}${networkInfo.ipAddress ? ` (${networkInfo.ipAddress})` : ''}`,
+    },
+    { label: 'GPS / CAMERA PERM', value: `${gpsPerm} / ${camPerm}` },
   ];
 
-  // Visual preview scaling
-  const previewMaxWidth = layout.isCompact ? 240 : 320;
+  const previewMaxWidth = layout.isCompact ? 230 : 310;
   const previewAspect = simulatedMetrics.width / simulatedMetrics.height;
   const previewW =
     simulatedMetrics.orientation === 'landscape'
       ? previewMaxWidth
-      : Math.min(previewMaxWidth, Math.round(220 * previewAspect));
-  const previewH = Math.max(140, Math.round(previewW / previewAspect));
+      : Math.min(previewMaxWidth, Math.round(210 * previewAspect));
+  const previewH = Math.max(135, Math.round(previewW / previewAspect));
 
   return (
     <ScrollView
       style={styles.root}
       contentContainerStyle={{
         paddingTop: layout.spacing.md,
-        paddingBottom: layout.spacing.xl + 20,
+        paddingBottom: layout.scrollBottomPadding,
         paddingLeft: layout.safePadding.left,
         paddingRight: layout.safePadding.right,
       }}
     >
       <View style={[styles.container, { maxWidth: layout.maxContentWidth }]}>
         <View>
-          <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]}>
-            Device Lab & Adaptive Inspector
+          <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]} numberOfLines={1}>
+            Device Lab & Sync Settings
           </Text>
-          <Text style={styles.screenSubtitle}>
-            Real-time viewport telemetry + interactive multi-device form factor simulator
+          <Text style={styles.screenSubtitle} numberOfLines={2}>
+            Hardware sensors, safe-area telemetry, REST endpoint configuration & responsive simulator
           </Text>
         </View>
 
         <View style={[styles.splitRow, isSplit && styles.splitRowActive, { gap: layout.gutter }]}>
-          {/* Host Device Live Metrics */}
-          <View style={[styles.card, isSplit && styles.colFlex, { padding: layout.cardPadding }]}>
-            <View style={styles.cardHeader}>
-              <Cpu size={16} color={COLORS.online} />
-              <Text style={styles.cardTitle}>LIVE HOST DEVICE TELEMETRY</Text>
-            </View>
+          {/* Left Column: Live Sensors + Sync Endpoint */}
+          <View style={[styles.colStack, isSplit && styles.colFlex, { gap: layout.gutter }]}>
+            <View style={[styles.card, { padding: layout.cardPadding }]}>
+              <View style={styles.cardHeader}>
+                <Cpu size={16} color={COLORS.online} />
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  LIVE DEVICE & SENSOR TELEMETRY
+                </Text>
+              </View>
 
-            <View style={styles.metricsList}>
-              {liveMetricsRows.map((row) => (
-                <View key={row.label} style={styles.metricItem}>
-                  <Text style={styles.metricLabel}>{row.label}</Text>
-                  <Text style={styles.metricVal}>{row.value}</Text>
+              <View style={styles.metricsList}>
+                {liveMetricsRows.map((row) => (
+                  <View key={row.label} style={styles.metricItem}>
+                    <Text style={styles.metricLabel} numberOfLines={1}>
+                      {row.label}
+                    </Text>
+                    <Text style={styles.metricVal} numberOfLines={1}>
+                      {row.value}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+
+              <Pressable
+                onPress={async () => {
+                  await triggerHaptic('light');
+                  await refreshNetworkStatus();
+                }}
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
+                ]}
+              >
+                <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                  REFRESH NETWORK & IP TELEMETRY
+                </Text>
+              </Pressable>
+
+              <View style={styles.divider} />
+
+              <View style={styles.cardHeader}>
+                <Fingerprint size={16} color={COLORS.textPrimary} />
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  BIOMETRIC ENCLAVE
+                </Text>
+              </View>
+
+              <View style={styles.metricsList}>
+                <View style={styles.metricItem}>
+                  <Text style={styles.metricLabel}>HARDWARE / ENROLLED</Text>
+                  <Text
+                    style={[
+                      styles.metricVal,
+                      { color: hardware?.hasHardware ? COLORS.online : COLORS.offline },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {hardware?.hasHardware ? 'YES' : 'NO'} / {hardware?.isEnrolled ? 'YES' : 'NO'}
+                  </Text>
                 </View>
-              ))}
+                <View style={styles.metricItem}>
+                  <Text style={styles.metricLabel}>SECURITY LEVEL</Text>
+                  <Text style={styles.metricVal} numberOfLines={1}>
+                    {hardware?.securityLevel ?? 'CHECKING'}
+                  </Text>
+                </View>
+              </View>
             </View>
 
-            <View style={styles.divider} />
+            {/* Real HTTP Endpoint Settings */}
+            <View style={[styles.card, { padding: layout.cardPadding }]}>
+              <View style={styles.cardHeader}>
+                <Globe size={16} color={COLORS.textPrimary} />
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  HTTP SYNC ENDPOINT CONFIGURATION
+                </Text>
+              </View>
 
-            <View style={styles.cardHeader}>
-              <Fingerprint size={16} color={COLORS.textPrimary} />
-              <Text style={styles.cardTitle}>BIOMETRIC HARDWARE & ENCLAVE</Text>
-            </View>
+              <Text style={styles.helperText}>
+                Enter a production REST API endpoint to POST signed operations with exponential
+                backoff, or leave empty to persist in the SHA-256 verified local ledger (
+                {ledgerCount} records stored).
+              </Text>
 
-            <View style={styles.metricsList}>
-              <View style={styles.metricItem}>
-                <Text style={styles.metricLabel}>HARDWARE SENSOR</Text>
-                <Text
-                  style={[
-                    styles.metricVal,
-                    { color: hardware?.hasHardware ? COLORS.online : COLORS.offline },
+              <TextInput
+                value={endpointDraft}
+                onChangeText={setEndpointDraft}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="https://api.example.com/v1/field-operations"
+                placeholderTextColor={COLORS.textMuted}
+                style={[styles.input, { minHeight: layout.minTouchTarget }]}
+              />
+
+              {endpointStatus ? <Text style={styles.statusNote}>{endpointStatus}</Text> : null}
+
+              <View style={styles.endpointButtons}>
+                <Pressable
+                  onPress={handleSaveEndpoint}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save HTTP Sync Endpoint"
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    { minHeight: layout.minTouchTarget, flex: 1, opacity: pressed ? 0.85 : 1 },
                   ]}
                 >
-                  {hardware?.hasHardware ? 'DETECTED' : 'UNAVAILABLE (FALLBACK)'}
-                </Text>
-              </View>
-              <View style={styles.metricItem}>
-                <Text style={styles.metricLabel}>BIOMETRIC ENROLLED</Text>
-                <Text style={styles.metricVal}>
-                  {hardware?.isEnrolled ? 'YES' : 'NO (PIN 2026 / DEMO)'}
-                </Text>
-              </View>
-              <View style={styles.metricItem}>
-                <Text style={styles.metricLabel}>SECURITY LEVEL</Text>
-                <Text style={styles.metricVal}>{hardware?.securityLevel ?? 'LOADING'}</Text>
-              </View>
-              <View style={styles.metricItem}>
-                <Text style={styles.metricLabel}>SECURE STORAGE</Text>
-                <Text style={[styles.metricVal, { flexShrink: 1, textAlign: 'right' }]}>
-                  {hardware?.storageDriver ?? 'INITIALIZING'}
-                </Text>
+                  <Text style={styles.primaryButtonText} numberOfLines={1}>
+                    SAVE ENDPOINT
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={async () => {
+                    await triggerHaptic('light');
+                    setEndpointDraft('');
+                    setSyncEndpointUrl('');
+                    setEndpointStatus('Cleared remote URL; using local SHA-256 verified ledger.');
+                  }}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
+                  ]}
+                >
+                  <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                    LOCAL LEDGER
+                  </Text>
+                </Pressable>
               </View>
             </View>
           </View>
 
-          {/* Interactive Multi-Device Preview */}
+          {/* Right Column: Adaptive Form Factor Simulator */}
           <View style={[styles.card, isSplit && styles.colFlex, { padding: layout.cardPadding }]}>
             <View style={styles.cardHeader}>
               <LayoutGrid size={16} color={COLORS.textPrimary} />
-              <Text style={styles.cardTitle}>INTERACTIVE MULTI-DEVICE SIMULATOR</Text>
+              <Text style={styles.cardTitle} numberOfLines={1}>
+                ADAPTIVE VIEWPORT SIMULATOR
+              </Text>
             </View>
 
             <View style={styles.presetButtons}>
@@ -204,6 +326,7 @@ export default function DeviceLabScreen() {
                         styles.presetLabel,
                         { color: active ? COLORS.primaryText : COLORS.textPrimary },
                       ]}
+                      numberOfLines={1}
                     >
                       {preset.label}
                     </Text>
@@ -225,25 +348,26 @@ export default function DeviceLabScreen() {
               ]}
             >
               <RotateCw size={15} color={COLORS.textPrimary} />
-              <Text style={styles.orientationText}>
-                ORIENTATION: {simOrientation.toUpperCase()} (TAP TO ROTATE)
+              <Text style={styles.orientationText} numberOfLines={1}>
+                ORIENTATION: {simOrientation.toUpperCase()} (ROTATE)
               </Text>
             </Pressable>
 
-            {/* Computed Preview Wireframe */}
             <View style={styles.previewStage}>
               <View
                 style={[
                   styles.deviceFrame,
                   {
                     width: previewW,
-                    minHeight: Math.min(260, previewH),
+                    minHeight: Math.min(250, previewH),
                   },
                 ]}
               >
                 <View style={styles.wireHeader}>
-                  <Text style={styles.wireBrand}>PULSE // {simulatedMetrics.platform.toUpperCase()}</Text>
-                  <Text style={styles.wireBadge}>
+                  <Text style={styles.wireBrand} numberOfLines={1}>
+                    PULSE // {simulatedMetrics.platform.toUpperCase()}
+                  </Text>
+                  <Text style={styles.wireBadge} numberOfLines={1}>
                     {simulatedMetrics.columns} COL • {simulatedMetrics.breakpoint.toUpperCase()}
                   </Text>
                 </View>
@@ -272,14 +396,14 @@ export default function DeviceLabScreen() {
 
                 <View style={styles.wireFooter}>
                   <ShieldCheck size={12} color={COLORS.online} />
-                  <Text style={styles.wireFooterText}>
-                    Touch ≥{simulatedMetrics.minTouchTarget}dp • SafeTop {simulatedMetrics.safePadding.top}dp
+                  <Text style={styles.wireFooterText} numberOfLines={1}>
+                    Touch ≥{simulatedMetrics.minTouchTarget}dp • Bottom+
+                    {simulatedMetrics.scrollBottomPadding}dp
                   </Text>
                 </View>
               </View>
             </View>
 
-            {/* Computed Simulated Spec Readout */}
             <View style={styles.simSpecBox}>
               <Text style={styles.simSpecTitle}>
                 {selectedPreset.label} ({simulatedMetrics.width} × {simulatedMetrics.height} dp)
@@ -287,8 +411,7 @@ export default function DeviceLabScreen() {
               <Text style={styles.simSpecLine}>{selectedPreset.hardwareNote}</Text>
               <Text style={styles.simSpecLine}>
                 BREAKPOINT: {simulatedMetrics.breakpoint.toUpperCase()} • COLUMNS:{' '}
-                {simulatedMetrics.columns} • GUTTER: {simulatedMetrics.gutter}dp • CARD PAD:{' '}
-                {simulatedMetrics.cardPadding}dp
+                {simulatedMetrics.columns} • GUTTER: {simulatedMetrics.gutter}dp
               </Text>
               <Text style={styles.simSpecLine}>
                 SAFE PADDING: T:{simulatedMetrics.safePadding.top} B:
@@ -322,6 +445,7 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 12,
     marginTop: 2,
+    flexShrink: 1,
   },
   splitRow: {
     flexDirection: 'column',
@@ -329,6 +453,9 @@ const styles = StyleSheet.create({
   splitRowActive: {
     flexDirection: 'row',
     alignItems: 'flex-start',
+  },
+  colStack: {
+    flexDirection: 'column',
   },
   colFlex: {
     flex: 1,
@@ -349,10 +476,11 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 0.7,
+    letterSpacing: 0.6,
+    flexShrink: 1,
   },
   metricsList: {
-    gap: 8,
+    gap: 7,
   },
   metricItem: {
     flexDirection: 'row',
@@ -368,19 +496,80 @@ const styles = StyleSheet.create({
   },
   metricLabel: {
     color: COLORS.textMuted,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
+    flexShrink: 0,
   },
   metricVal: {
     color: COLORS.textPrimary,
     fontSize: 11,
     fontWeight: '700',
     fontFamily: 'monospace',
+    flex: 1,
+    flexShrink: 1,
+    textAlign: 'right',
   },
   divider: {
     height: 1,
     backgroundColor: COLORS.border,
     marginVertical: 2,
+  },
+  helperText: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  input: {
+    backgroundColor: COLORS.surfaceElevated,
+    borderWidth: 1,
+    borderColor: COLORS.borderStrong,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    fontFamily: 'monospace',
+  },
+  statusNote: {
+    color: COLORS.online,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  endpointButtons: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  primaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+    borderRadius: 8,
+    paddingHorizontal: 14,
+  },
+  primaryButtonText: {
+    color: COLORS.primaryText,
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  secondaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.surfaceElevated,
+    borderWidth: 1,
+    borderColor: COLORS.borderStrong,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
+  secondaryButtonText: {
+    color: COLORS.textPrimary,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    flexShrink: 1,
   },
   presetButtons: {
     flexDirection: 'row',
@@ -399,6 +588,7 @@ const styles = StyleSheet.create({
   presetLabel: {
     fontSize: 11,
     fontWeight: '800',
+    flexShrink: 1,
   },
   orientationButton: {
     flexDirection: 'row',
@@ -416,6 +606,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   previewStage: {
     backgroundColor: COLORS.background,
@@ -448,11 +639,13 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 9,
     fontWeight: '800',
+    flexShrink: 1,
   },
   wireBadge: {
     color: COLORS.online,
     fontSize: 8,
     fontWeight: '800',
+    flexShrink: 0,
   },
   wireGrid: {
     flexDirection: 'row',
@@ -491,6 +684,7 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 9,
     fontWeight: '600',
+    flexShrink: 1,
   },
   simSpecBox: {
     backgroundColor: COLORS.surfaceElevated,

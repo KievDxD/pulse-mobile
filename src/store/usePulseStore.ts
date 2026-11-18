@@ -2,230 +2,81 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist, StateStorage } from 'zustand/middleware';
 import type { AuthMethod } from '../services/biometricAuth';
-import { calculatePayloadBytes, generateIntegrityHash } from '../utils/hash';
+import { fetchRealNetworkStatus, RealNetworkStatus } from '../services/networkMonitor';
+import { syncOperationRecord } from '../services/syncClient';
+import {
+  buildCanonicalOperationPayload,
+  Coordinates,
+  CreateOperationInput,
+  FieldOperation,
+  NetworkMode,
+  OperationCategory,
+  PriorityLevel,
+  SyncStatus,
+  SyncTransportMode,
+} from '../types/operations';
+import { calculatePayloadBytes, generateIntegrityHashAsync } from '../utils/hash';
 
-export type PriorityLevel = 'CRITICAL' | 'HIGH' | 'NORMAL';
-export type OperationCategory =
-  | 'INFRASTRUCTURE'
-  | 'POWER_GRID'
-  | 'TELEMETRY'
-  | 'SECURITY'
-  | 'MAINTENANCE';
-export type SyncStatus = 'QUEUED_LOCAL' | 'SYNCING' | 'SYNCED_CLOUD' | 'SYNC_FAILED';
-export type NetworkMode = 'ONLINE' | 'OFFLINE';
-
-export interface Coordinates {
-  latitude: number;
-  longitude: number;
-  sector: string;
-  accuracyMeters?: number;
-}
-
-export interface FieldOperation {
-  id: string;
-  code: string;
-  title: string;
-  category: OperationCategory;
-  priority: PriorityLevel;
-  coordinates: Coordinates;
-  technicalNote: string;
-  checkpointId?: string;
-  syncStatus: SyncStatus;
-  integrityHash: string;
-  createdAt: string;
-  syncedAt?: string;
-  latencyMs?: number;
-  retryCount: number;
-  payloadBytes: number;
-  lastError?: string;
-}
-
-export interface CreateOperationInput {
-  title: string;
-  category: OperationCategory;
-  priority: PriorityLevel;
-  coordinates: Coordinates;
-  technicalNote: string;
-  checkpointId?: string;
-}
+export type {
+  Coordinates,
+  CreateOperationInput,
+  FieldOperation,
+  NetworkMode,
+  OperationCategory,
+  PriorityLevel,
+  SyncStatus,
+  SyncTransportMode,
+};
 
 export interface SyncOptions {
-  stepDelayMs?: number;
+  timeoutMs?: number;
+  maxRetries?: number;
+  baseDelayMs?: number;
 }
 
 export interface PulseState {
   operations: FieldOperation[];
   networkMode: NetworkMode;
+  networkInfo: RealNetworkStatus;
+  syncEndpointUrl: string;
   isSyncing: boolean;
-  simulatedFaultMode: boolean;
   isUnlocked: boolean;
   authMethod: AuthMethod | null;
   lastSyncAt: string | null;
-  addOperation: (input: CreateOperationInput, options?: { autoSync?: boolean }) => FieldOperation;
+  createOperation: (
+    input: CreateOperationInput,
+    options?: { autoSync?: boolean }
+  ) => Promise<FieldOperation>;
+  applyRealNetworkStatus: (status: RealNetworkStatus, options?: SyncOptions) => Promise<void>;
+  refreshNetworkStatus: (options?: SyncOptions) => Promise<RealNetworkStatus>;
   setNetworkMode: (mode: NetworkMode, options?: SyncOptions) => Promise<void>;
-  toggleNetworkMode: (options?: SyncOptions) => Promise<void>;
-  setSimulatedFaultMode: (enabled: boolean) => void;
+  setSyncEndpointUrl: (url: string) => void;
   syncQueue: (options?: SyncOptions) => Promise<{ synced: number; failed: number }>;
   retryOperation: (id: string, options?: SyncOptions) => Promise<boolean>;
-  simulateNetworkFailure: (targetId?: string) => FieldOperation;
   unlockSession: (method: AuthMethod) => void;
   lockSession: () => void;
-  resetDemoData: () => void;
+  clearAllOperations: () => void;
 }
 
-function buildOperationRecord(
-  seed: Omit<FieldOperation, 'integrityHash' | 'payloadBytes'>
-): FieldOperation {
-  const canonicalPayload = JSON.stringify({
-    id: seed.id,
-    code: seed.code,
-    title: seed.title,
-    category: seed.category,
-    priority: seed.priority,
-    coordinates: seed.coordinates,
-    technicalNote: seed.technicalNote,
-    checkpointId: seed.checkpointId ?? null,
-    createdAt: seed.createdAt,
-  });
-
-  return {
-    ...seed,
-    integrityHash: generateIntegrityHash(canonicalPayload),
-    payloadBytes: calculatePayloadBytes(canonicalPayload),
-  };
-}
-
-export const INITIAL_OPERATIONS: FieldOperation[] = [
-  buildOperationRecord({
-    id: 'op-seed-1006',
-    code: 'OP-1006',
-    title: 'Substation T-14 Thermal Drift Alert',
-    category: 'POWER_GRID',
-    priority: 'CRITICAL',
-    coordinates: {
-      latitude: 40.7128,
-      longitude: -74.006,
-      sector: 'SECTOR-NE-04',
-      accuracyMeters: 2.1,
-    },
-    technicalNote:
-      'Primary transformer bushing temperature reached 89.4°C under peak load; coolant pump flow verified at 94%.',
-    checkpointId: 'CHK-2026-ALPHA',
-    syncStatus: 'QUEUED_LOCAL',
-    createdAt: '2026-11-17T20:42:00.000Z',
-    retryCount: 0,
-  }),
-  buildOperationRecord({
-    id: 'op-seed-1005',
-    code: 'OP-1005',
-    title: 'Fiber Trunk Attenuation Check',
-    category: 'TELEMETRY',
-    priority: 'HIGH',
-    coordinates: {
-      latitude: 40.7306,
-      longitude: -73.9866,
-      sector: 'SECTOR-NE-02',
-      accuracyMeters: 3.0,
-    },
-    technicalNote:
-      'OTDR trace indicates 1.8dB splice loss at manhole 47B; standby dark fiber route verified clean.',
-    checkpointId: 'CHK-2026-BRAVO',
-    syncStatus: 'QUEUED_LOCAL',
-    createdAt: '2026-11-17T20:15:00.000Z',
-    retryCount: 0,
-  }),
-  buildOperationRecord({
-    id: 'op-seed-1004',
-    code: 'OP-1004',
-    title: 'Perimeter Lidar Sensor Calibration',
-    category: 'SECURITY',
-    priority: 'NORMAL',
-    coordinates: {
-      latitude: 40.7484,
-      longitude: -73.9857,
-      sector: 'SECTOR-CORE-01',
-      accuracyMeters: 1.8,
-    },
-    technicalNote:
-      'Recalibrated north gate optical array after wind storm; zero false positives over 15-minute soak.',
-    checkpointId: 'CHK-2026-CHARLIE',
-    syncStatus: 'SYNCED_CLOUD',
-    createdAt: '2026-11-17T19:10:00.000Z',
-    syncedAt: '2026-11-17T19:10:04.000Z',
-    latencyMs: 68,
-    retryCount: 0,
-  }),
-  buildOperationRecord({
-    id: 'op-seed-1003',
-    code: 'OP-1003',
-    title: 'Backup Diesel Generator Fuel Audit',
-    category: 'MAINTENANCE',
-    priority: 'NORMAL',
-    coordinates: {
-      latitude: 40.758,
-      longitude: -73.9855,
-      sector: 'SECTOR-NORTH-07',
-      accuracyMeters: 2.6,
-    },
-    technicalNote:
-      'Reserve tank level at 91% (4,120L); water separator drained and load-bank test passed.',
-    checkpointId: 'CHK-2026-DELTA',
-    syncStatus: 'SYNCED_CLOUD',
-    createdAt: '2026-11-17T18:20:00.000Z',
-    syncedAt: '2026-11-17T18:20:03.000Z',
-    latencyMs: 84,
-    retryCount: 0,
-  }),
-  buildOperationRecord({
-    id: 'op-seed-1002',
-    code: 'OP-1002',
-    title: 'Microwave Backhaul Dish Alignment',
-    category: 'INFRASTRUCTURE',
-    priority: 'HIGH',
-    coordinates: {
-      latitude: 40.7061,
-      longitude: -74.0088,
-      sector: 'SECTOR-SOUTH-03',
-      accuracyMeters: 2.4,
-    },
-    technicalNote:
-      'Azimuth trimmed +0.4° following tower tension check; RSSI improved from -61dBm to -54dBm.',
-    checkpointId: 'CHK-2026-ECHO',
-    syncStatus: 'SYNCED_CLOUD',
-    createdAt: '2026-11-17T17:05:00.000Z',
-    syncedAt: '2026-11-17T17:05:02.000Z',
-    latencyMs: 92,
-    retryCount: 0,
-  }),
-  buildOperationRecord({
-    id: 'op-seed-1001',
-    code: 'OP-1001',
-    title: 'Switchgear Relay Firmware Integrity',
-    category: 'POWER_GRID',
-    priority: 'CRITICAL',
-    coordinates: {
-      latitude: 40.7195,
-      longitude: -74.0112,
-      sector: 'SECTOR-WEST-05',
-      accuracyMeters: 1.9,
-    },
-    technicalNote:
-      'Verified protective relay firmware checksum and trip coil continuity on Bus B.',
-    checkpointId: 'CHK-2026-FOXTROT',
-    syncStatus: 'SYNCED_CLOUD',
-    createdAt: '2026-11-17T15:50:00.000Z',
-    syncedAt: '2026-11-17T15:50:05.000Z',
-    latencyMs: 114,
-    retryCount: 0,
-  }),
-];
+const DEFAULT_NETWORK_INFO: RealNetworkStatus = {
+  isConnected: true,
+  isInternetReachable: true,
+  type: 'UNKNOWN',
+  ipAddress: null,
+  isOffline: false,
+  checkedAt: new Date(0).toISOString(),
+};
 
 const memoryFallbackMap = new Map<string, string>();
 
 const safeAsyncStorage: StateStorage = {
   getItem: async (name: string): Promise<string | null> => {
     try {
-      if (typeof window === 'undefined' && typeof process !== 'undefined' && process.env?.JEST_WORKER_ID) {
+      if (
+        typeof window === 'undefined' &&
+        typeof process !== 'undefined' &&
+        process.env?.JEST_WORKER_ID
+      ) {
         return memoryFallbackMap.get(name) ?? null;
       }
       return await AsyncStorage.getItem(name);
@@ -236,34 +87,37 @@ const safeAsyncStorage: StateStorage = {
   setItem: async (name: string, value: string): Promise<void> => {
     memoryFallbackMap.set(name, value);
     try {
-      if (typeof window === 'undefined' && typeof process !== 'undefined' && process.env?.JEST_WORKER_ID) {
+      if (
+        typeof window === 'undefined' &&
+        typeof process !== 'undefined' &&
+        process.env?.JEST_WORKER_ID
+      ) {
         return;
       }
       await AsyncStorage.setItem(name, value);
     } catch {
-      // Fallback already persisted in memory
+      // Fallback persisted in memory
     }
   },
   removeItem: async (name: string): Promise<void> => {
     memoryFallbackMap.delete(name);
     try {
-      if (typeof window === 'undefined' && typeof process !== 'undefined' && process.env?.JEST_WORKER_ID) {
+      if (
+        typeof window === 'undefined' &&
+        typeof process !== 'undefined' &&
+        process.env?.JEST_WORKER_ID
+      ) {
         return;
       }
       await AsyncStorage.removeItem(name);
     } catch {
-      // Ignore removal fallback error
+      // Ignore removal error
     }
   },
 };
 
-function sleep(ms: number): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function nextOperationCode(operations: FieldOperation[]): string {
-  let maxNum = 1006;
+  let maxNum = 1000;
   for (const op of operations) {
     const match = /^OP-(\d+)$/.exec(op.code);
     if (match) {
@@ -274,29 +128,25 @@ function nextOperationCode(operations: FieldOperation[]): string {
   return `OP-${maxNum + 1}`;
 }
 
-function computeRealisticLatency(payloadBytes: number, retryCount: number): number {
-  const base = 48 + (payloadBytes % 75) + retryCount * 19;
-  return Math.min(240, Math.max(42, base));
-}
-
 export const usePulseStore = create<PulseState>()(
   persist(
     (set, get) => ({
-      operations: INITIAL_OPERATIONS,
+      operations: [],
       networkMode: 'ONLINE',
+      networkInfo: DEFAULT_NETWORK_INFO,
+      syncEndpointUrl: '',
       isSyncing: false,
-      simulatedFaultMode: false,
       isUnlocked: false,
       authMethod: null,
-      lastSyncAt: '2026-11-17T19:10:04.000Z',
+      lastSyncAt: null,
 
-      addOperation: (input, options) => {
+      createOperation: async (input, options) => {
         const currentOps = get().operations;
         const code = nextOperationCode(currentOps);
         const createdAt = new Date().toISOString();
-        const id = `op-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const id = `op-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 
-        const newOp = buildOperationRecord({
+        const seed = {
           id,
           code,
           title: input.title.trim(),
@@ -305,21 +155,51 @@ export const usePulseStore = create<PulseState>()(
           coordinates: input.coordinates,
           technicalNote: input.technicalNote.trim(),
           checkpointId: input.checkpointId?.trim() || undefined,
-          syncStatus: 'QUEUED_LOCAL',
           createdAt,
+        };
+
+        const canonicalPayload = buildCanonicalOperationPayload(seed);
+        const integrityHash = await generateIntegrityHashAsync(canonicalPayload);
+        const payloadBytes = calculatePayloadBytes(canonicalPayload);
+
+        const newOp: FieldOperation = {
+          ...seed,
+          syncStatus: 'QUEUED_LOCAL',
+          integrityHash,
+          payloadBytes,
           retryCount: 0,
-        });
+        };
 
         set((state) => ({
           operations: [newOp, ...state.operations],
         }));
 
         const shouldAutoSync = options?.autoSync !== false;
-        if (shouldAutoSync && get().networkMode === 'ONLINE' && !get().simulatedFaultMode) {
-          void get().syncQueue();
+        if (shouldAutoSync && get().networkMode === 'ONLINE') {
+          await get().syncQueue();
         }
 
-        return newOp;
+        return get().operations.find((op) => op.id === id) ?? newOp;
+      },
+
+      applyRealNetworkStatus: async (status, options) => {
+        const previousMode = get().networkMode;
+        const nextMode: NetworkMode = status.isOffline ? 'OFFLINE' : 'ONLINE';
+
+        set({
+          networkInfo: status,
+          networkMode: nextMode,
+        });
+
+        if (nextMode === 'ONLINE' && previousMode === 'OFFLINE') {
+          await get().syncQueue(options);
+        }
+      },
+
+      refreshNetworkStatus: async (options) => {
+        const status = await fetchRealNetworkStatus();
+        await get().applyRealNetworkStatus(status, options);
+        return status;
       },
 
       setNetworkMode: async (mode, options) => {
@@ -331,23 +211,12 @@ export const usePulseStore = create<PulseState>()(
         }
       },
 
-      toggleNetworkMode: async (options) => {
-        const nextMode: NetworkMode = get().networkMode === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
-        await get().setNetworkMode(nextMode, options);
-      },
-
-      setSimulatedFaultMode: (enabled) => {
-        set({ simulatedFaultMode: enabled });
+      setSyncEndpointUrl: (url) => {
+        set({ syncEndpointUrl: url.trim() });
       },
 
       syncQueue: async (options) => {
-        const stepDelayMs = options?.stepDelayMs ?? 240;
-
-        if (get().networkMode === 'OFFLINE') {
-          return { synced: 0, failed: 0 };
-        }
-
-        if (get().isSyncing) {
+        if (get().networkMode === 'OFFLINE' || get().isSyncing) {
           return { synced: 0, failed: 0 };
         }
 
@@ -372,13 +241,21 @@ export const usePulseStore = create<PulseState>()(
               break;
             }
 
+            const currentTarget = get().operations.find((op) => op.id === id);
+            if (!currentTarget) continue;
+
             set((state) => ({
               operations: state.operations.map((op) =>
                 op.id === id ? { ...op, syncStatus: 'SYNCING', lastError: undefined } : op
               ),
             }));
 
-            await sleep(stepDelayMs);
+            const result = await syncOperationRecord(currentTarget, {
+              endpointUrl: get().syncEndpointUrl,
+              timeoutMs: options?.timeoutMs,
+              maxRetries: options?.maxRetries,
+              baseDelayMs: options?.baseDelayMs,
+            });
 
             if (get().networkMode === 'OFFLINE') {
               set((state) => ({
@@ -389,8 +266,25 @@ export const usePulseStore = create<PulseState>()(
               break;
             }
 
-            const shouldFail = get().simulatedFaultMode;
-            if (shouldFail) {
+            if (result.ok) {
+              synced += 1;
+              const syncedAt = result.syncedAt ?? new Date().toISOString();
+              set((state) => ({
+                lastSyncAt: syncedAt,
+                operations: state.operations.map((op) =>
+                  op.id === id
+                    ? {
+                        ...op,
+                        syncStatus: 'SYNCED_CLOUD',
+                        syncMode: result.mode,
+                        syncedAt,
+                        latencyMs: result.latencyMs,
+                        lastError: undefined,
+                      }
+                    : op
+                ),
+              }));
+            } else {
               failed += 1;
               set((state) => ({
                 operations: state.operations.map((op) =>
@@ -398,25 +292,10 @@ export const usePulseStore = create<PulseState>()(
                     ? {
                         ...op,
                         syncStatus: 'SYNC_FAILED',
+                        syncMode: result.mode,
                         retryCount: op.retryCount + 1,
-                        lastError: 'Simulated uplink packet loss (ERR_GATEWAY_TIMEOUT)',
-                      }
-                    : op
-                ),
-              }));
-            } else {
-              synced += 1;
-              const nowIso = new Date().toISOString();
-              set((state) => ({
-                lastSyncAt: nowIso,
-                operations: state.operations.map((op) =>
-                  op.id === id
-                    ? {
-                        ...op,
-                        syncStatus: 'SYNCED_CLOUD',
-                        syncedAt: nowIso,
-                        latencyMs: computeRealisticLatency(op.payloadBytes, op.retryCount),
-                        lastError: undefined,
+                        latencyMs: result.latencyMs,
+                        lastError: result.error ?? 'Synchronization failed.',
                       }
                     : op
                 ),
@@ -431,7 +310,6 @@ export const usePulseStore = create<PulseState>()(
       },
 
       retryOperation: async (id, options) => {
-        const stepDelayMs = options?.stepDelayMs ?? 200;
         const target = get().operations.find((op) => op.id === id);
         if (!target) return false;
 
@@ -442,7 +320,7 @@ export const usePulseStore = create<PulseState>()(
                 ? {
                     ...op,
                     syncStatus: 'QUEUED_LOCAL',
-                    lastError: 'Device in OFFLINE AIRPLANE MODE. Packet held in local queue.',
+                    lastError: 'Device offline. Packet stays queued until connectivity resumes.',
                   }
                 : op
             ),
@@ -456,87 +334,48 @@ export const usePulseStore = create<PulseState>()(
           ),
         }));
 
-        await sleep(stepDelayMs);
+        const result = await syncOperationRecord(target, {
+          endpointUrl: get().syncEndpointUrl,
+          timeoutMs: options?.timeoutMs,
+          maxRetries: options?.maxRetries,
+          baseDelayMs: options?.baseDelayMs,
+        });
 
-        if (get().simulatedFaultMode) {
+        if (result.ok) {
+          const syncedAt = result.syncedAt ?? new Date().toISOString();
           set((state) => ({
+            lastSyncAt: syncedAt,
             operations: state.operations.map((op) =>
               op.id === id
                 ? {
                     ...op,
-                    syncStatus: 'SYNC_FAILED',
-                    retryCount: op.retryCount + 1,
-                    lastError: 'Fault injection active: disable Fault Mode or toggle uplink.',
+                    syncStatus: 'SYNCED_CLOUD',
+                    syncMode: result.mode,
+                    syncedAt,
+                    latencyMs: result.latencyMs,
+                    lastError: undefined,
                   }
                 : op
             ),
           }));
-          return false;
+          return true;
         }
 
-        const nowIso = new Date().toISOString();
         set((state) => ({
-          lastSyncAt: nowIso,
           operations: state.operations.map((op) =>
             op.id === id
               ? {
                   ...op,
-                  syncStatus: 'SYNCED_CLOUD',
-                  syncedAt: nowIso,
-                  latencyMs: computeRealisticLatency(op.payloadBytes, op.retryCount + 1),
-                  lastError: undefined,
+                  syncStatus: 'SYNC_FAILED',
+                  syncMode: result.mode,
+                  retryCount: op.retryCount + 1,
+                  latencyMs: result.latencyMs,
+                  lastError: result.error ?? 'Retry failed.',
                 }
               : op
           ),
         }));
-        return true;
-      },
-
-      simulateNetworkFailure: (targetId) => {
-        const current = get().operations;
-        const candidate =
-          (targetId ? current.find((op) => op.id === targetId) : undefined) ??
-          current.find((op) => op.syncStatus === 'QUEUED_LOCAL');
-
-        if (candidate) {
-          const updated: FieldOperation = {
-            ...candidate,
-            syncStatus: 'SYNC_FAILED',
-            retryCount: candidate.retryCount + 1,
-            lastError: 'Simulated uplink interruption (ERR_SYNC_TIMEOUT_504)',
-          };
-          set((state) => ({
-            operations: state.operations.map((op) => (op.id === candidate.id ? updated : op)),
-          }));
-          return updated;
-        }
-
-        const code = nextOperationCode(current);
-        const faultPacket = buildOperationRecord({
-          id: `op-fault-${Date.now()}`,
-          code,
-          title: 'Telemetry Heartbeat Fault Probe',
-          category: 'TELEMETRY',
-          priority: 'HIGH',
-          coordinates: {
-            latitude: 40.7143,
-            longitude: -74.006,
-            sector: 'SECTOR-TEST-99',
-            accuracyMeters: 2.5,
-          },
-          technicalNote:
-            'Simulated packet drop injected from Sync Queue audit console to verify retry resilience.',
-          checkpointId: 'CHK-2026-DIAG',
-          syncStatus: 'SYNC_FAILED',
-          createdAt: new Date().toISOString(),
-          retryCount: 1,
-          lastError: 'Simulated uplink interruption (ERR_SYNC_TIMEOUT_504)',
-        });
-
-        set((state) => ({
-          operations: [faultPacket, ...state.operations],
-        }));
-        return faultPacket;
+        return false;
       },
 
       unlockSession: (method) => {
@@ -547,22 +386,20 @@ export const usePulseStore = create<PulseState>()(
         set({ isUnlocked: false, authMethod: null });
       },
 
-      resetDemoData: () => {
+      clearAllOperations: () => {
         set({
-          operations: INITIAL_OPERATIONS,
-          networkMode: 'ONLINE',
+          operations: [],
           isSyncing: false,
-          simulatedFaultMode: false,
-          lastSyncAt: '2026-11-17T19:10:04.000Z',
+          lastSyncAt: null,
         });
       },
     }),
     {
-      name: 'pulse-mobile-store-v1',
+      name: 'pulse-mobile-store-v2',
       storage: createJSONStorage(() => safeAsyncStorage),
       partialize: (state) => ({
         operations: state.operations,
-        networkMode: state.networkMode,
+        syncEndpointUrl: state.syncEndpointUrl,
         lastSyncAt: state.lastSyncAt,
       }),
     }

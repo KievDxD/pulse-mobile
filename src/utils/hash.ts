@@ -1,3 +1,5 @@
+import * as Crypto from 'expo-crypto';
+
 const K = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -32,8 +34,7 @@ function encodeUtf8(input: string): Uint8Array {
 }
 
 /**
- * Pure TypeScript SHA-256 digest computation that executes deterministically across
- * iOS, Android, Web, and Jest without requiring native crypto bindings.
+ * Standard SHA-256 computation used for synchronous previews and non-HTTPS WebCrypto fallback.
  */
 export function computeSha256Hex(message: string): string {
   const bytes = encodeUtf8(message);
@@ -113,14 +114,37 @@ export function computeSha256Hex(message: string): string {
 }
 
 /**
- * Generates a verifiable integrity signature prefixed with `sha256:`.
+ * Computes a hardware-accelerated SHA-256 digest via expo-crypto (with RFC-compliant fallback on HTTP web).
+ */
+export async function generateIntegrityHashAsync(payload: string): Promise<string> {
+  try {
+    const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, payload);
+    return `sha256:${digest.toLowerCase()}`;
+  } catch {
+    return `sha256:${computeSha256Hex(payload)}`;
+  }
+}
+
+/**
+ * Verifies payload integrity asynchronously via expo-crypto SHA-256.
+ */
+export async function verifyIntegrityHashAsync(
+  payload: string,
+  expectedHash: string
+): Promise<boolean> {
+  const computed = await generateIntegrityHashAsync(payload);
+  return computed === expectedHash;
+}
+
+/**
+ * Synchronous SHA-256 digest helper for live preview rendering.
  */
 export function generateIntegrityHash(payload: string): string {
   return `sha256:${computeSha256Hex(payload)}`;
 }
 
 /**
- * Validates that a serialized payload matches its recorded integrity hash.
+ * Synchronous payload integrity verifier.
  */
 export function verifyIntegrityHash(payload: string, expectedHash: string): boolean {
   return generateIntegrityHash(payload) === expectedHash;
@@ -136,7 +160,7 @@ export function formatShortHash(hash: string): string {
 }
 
 /**
- * Computes UTF-8 byte size for offline packet auditing.
+ * Computes UTF-8 byte size for packet payload auditing.
  */
 export function calculatePayloadBytes(payload: unknown): number {
   return encodeUtf8(JSON.stringify(payload)).length;

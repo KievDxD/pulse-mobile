@@ -1,12 +1,13 @@
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
+import { generateIntegrityHashAsync } from '../utils/hash';
 
-export const DEFAULT_PIN = '2026';
-const SESSION_TOKEN_KEY = 'pulse_mobile_auth_session_v1';
-const PIN_STORE_KEY = 'pulse_mobile_pin_v1';
+const SESSION_TOKEN_KEY = 'pulse_mobile_auth_session_v2';
+const PIN_HASH_KEY = 'pulse_mobile_pin_sha256_v2';
+const PIN_SALT_PREFIX = 'pulse_pin_enclave_v2:';
 
-export type AuthMethod = 'BIOMETRIC' | 'PIN' | 'DEMO_BYPASS';
+export type AuthMethod = 'BIOMETRIC' | 'PIN';
 
 export interface BiometricHardwareInfo {
   hasHardware: boolean;
@@ -75,7 +76,7 @@ async function deleteSecureValue(key: string): Promise<void> {
         window.localStorage.removeItem(key);
       }
     } catch {
-      // Ignore web storage access errors
+      // Ignore web storage errors
     }
     return;
   }
@@ -83,7 +84,7 @@ async function deleteSecureValue(key: string): Promise<void> {
   try {
     await SecureStore.deleteItemAsync(key);
   } catch {
-    // Ignore native deletion errors
+    // Ignore native delete errors
   }
 }
 
@@ -119,7 +120,7 @@ function mapSecurityLevelName(level: LocalAuthentication.SecurityLevel): string 
 export async function inspectBiometricHardware(): Promise<BiometricHardwareInfo> {
   const storageDriver =
     Platform.OS === 'web'
-      ? 'Web Storage Fallback (Use Native iOS/Android for Keychain/Keystore)'
+      ? 'Web Storage Fallback (Keychain/Keystore active on iOS/Android)'
       : Platform.OS === 'ios'
       ? 'iOS Keychain (expo-secure-store)'
       : 'Android Keystore AES-256 (expo-secure-store)';
@@ -128,8 +129,8 @@ export async function inspectBiometricHardware(): Promise<BiometricHardwareInfo>
     return {
       hasHardware: false,
       isEnrolled: false,
-      supportedTypes: ['PIN Fallback (2026)', 'Instant Demo Unlock'],
-      securityLevel: 'WEB_SANDBOX_FALLBACK',
+      supportedTypes: ['Encrypted User PIN (SHA-256)'],
+      securityLevel: 'WEB_CRYPTO_FALLBACK',
       platform: Platform.OS,
       storageDriver,
     };
@@ -144,7 +145,7 @@ export async function inspectBiometricHardware(): Promise<BiometricHardwareInfo>
     ]);
 
     const supportedTypes =
-      rawTypes.length > 0 ? rawTypes.map(mapAuthTypeName) : ['Device PIN (2026)'];
+      rawTypes.length > 0 ? rawTypes.map(mapAuthTypeName) : ['Encrypted User PIN'];
 
     return {
       hasHardware,
@@ -158,8 +159,8 @@ export async function inspectBiometricHardware(): Promise<BiometricHardwareInfo>
     return {
       hasHardware: false,
       isEnrolled: false,
-      supportedTypes: ['PIN Fallback (2026)'],
-      securityLevel: 'EMULATOR_FALLBACK',
+      supportedTypes: ['Encrypted User PIN'],
+      securityLevel: 'UNAVAILABLE_FALLBACK',
       platform: Platform.OS,
       storageDriver,
     };
@@ -176,6 +177,33 @@ async function persistSession(method: AuthMethod): Promise<string> {
 }
 
 /**
+ * Checks whether the operator has already configured an encrypted 4-digit PIN in SecureStore.
+ */
+export async function hasConfiguredPin(): Promise<boolean> {
+  const storedHash = await readSecureValue(PIN_HASH_KEY);
+  return typeof storedHash === 'string' && storedHash.startsWith('sha256:');
+}
+
+/**
+ * Creates or updates the operator's 4-digit PIN, hashing it with SHA-256 before storing in SecureStore.
+ */
+export async function configureUserPin(pin: string): Promise<AuthResult> {
+  const clean = pin.trim();
+  if (!/^\d{4}$/.test(clean)) {
+    return {
+      success: false,
+      method: 'PIN',
+      error: 'Security PIN must be exactly 4 numeric digits.',
+    };
+  }
+
+  const digest = await generateIntegrityHashAsync(`${PIN_SALT_PREFIX}${clean}`);
+  await writeSecureValue(PIN_HASH_KEY, digest);
+  const token = await persistSession('PIN');
+  return { success: true, method: 'PIN', token };
+}
+
+/**
  * Prompts native FaceID / TouchID / Fingerprint authentication via expo-local-authentication.
  */
 export async function authenticateWithBiometrics(): Promise<AuthResult> {
@@ -183,7 +211,7 @@ export async function authenticateWithBiometrics(): Promise<AuthResult> {
     return {
       success: false,
       method: 'BIOMETRIC',
-      error: 'Native biometric prompt is unavailable on Web. Use PIN 2026 or Instant Demo Unlock.',
+      error: 'Web browser lacks native biometric hardware. Authenticate with your encrypted 4-digit PIN.',
     };
   }
 
@@ -195,13 +223,13 @@ export async function authenticateWithBiometrics(): Promise<AuthResult> {
       return {
         success: false,
         method: 'BIOMETRIC',
-        error: 'Biometric hardware not enrolled on this device/emulator. Use PIN 2026 or Instant Demo Unlock.',
+        error: 'No enrolled biometric credentials detected on this device. Use your encrypted 4-digit PIN.',
       };
     }
 
     const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: 'PULSE // MOBILE Clearance',
-      fallbackLabel: 'Use Security PIN (2026)',
+      promptMessage: 'PULSE // MOBILE Biometric Authentication',
+      fallbackLabel: 'Use Security PIN',
       cancelLabel: 'Cancel',
       disableDeviceFallback: false,
     });
@@ -214,40 +242,42 @@ export async function authenticateWithBiometrics(): Promise<AuthResult> {
     return {
       success: false,
       method: 'BIOMETRIC',
-      error: result.error || 'Biometric authentication cancelled or rejected.',
+      error: result.error || 'Biometric verification cancelled or rejected.',
     };
   } catch {
     return {
       success: false,
       method: 'BIOMETRIC',
-      error: 'Biometric prompt failed. Use Security PIN (2026) or Instant Demo Unlock.',
+      error: 'Biometric authentication failed. Verify with your encrypted 4-digit PIN.',
     };
   }
 }
 
 /**
- * Validates security PIN against SecureStore or default operator PIN (`2026`).
+ * Verifies the user's 4-digit PIN against its SHA-256 hash stored in SecureStore.
  */
 export async function authenticateWithPin(pin: string): Promise<AuthResult> {
-  const storedPin = (await readSecureValue(PIN_STORE_KEY)) ?? DEFAULT_PIN;
-  if (pin.trim() !== storedPin) {
+  const clean = pin.trim();
+  const storedHash = await readSecureValue(PIN_HASH_KEY);
+  if (!storedHash) {
     return {
       success: false,
       method: 'PIN',
-      error: 'Invalid clearance PIN. Default operator PIN is 2026.',
+      error: 'No security PIN configured yet. Complete initial PIN enrollment first.',
+    };
+  }
+
+  const candidateHash = await generateIntegrityHashAsync(`${PIN_SALT_PREFIX}${clean}`);
+  if (candidateHash !== storedHash) {
+    return {
+      success: false,
+      method: 'PIN',
+      error: 'Invalid security PIN. Please try again.',
     };
   }
 
   const token = await persistSession('PIN');
   return { success: true, method: 'PIN', token };
-}
-
-/**
- * Immediate 1-click clearance bypass for recruiters reviewing on emulators or web browsers.
- */
-export async function instantDemoUnlock(): Promise<AuthResult> {
-  const token = await persistSession('DEMO_BYPASS');
-  return { success: true, method: 'DEMO_BYPASS', token };
 }
 
 export async function getStoredAuthSession(): Promise<{
@@ -266,4 +296,8 @@ export async function getStoredAuthSession(): Promise<{
 
 export async function clearAuthSession(): Promise<void> {
   await deleteSecureValue(SESSION_TOKEN_KEY);
+}
+
+export async function clearConfiguredPin(): Promise<void> {
+  await deleteSecureValue(PIN_HASH_KEY);
 }

@@ -2,7 +2,11 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
-    "types": ["jest", "node", "react"]
+    "types": [
+      "jest",
+      "node",
+      "react"
+    ]
   },
   "include": [
     "app/**/*.ts",
@@ -11,6 +15,8 @@
     "src/**/*.tsx",
     "__tests__/**/*.ts",
     "__tests__/**/*.tsx",
-    "jest.setup.ts"
+    "jest.setup.ts",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts"
   ]
 }

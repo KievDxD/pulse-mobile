@@ -1,7 +1,8 @@
 import { useRouter } from 'expo-router';
 import { Lock, Plane, RefreshCw, ShieldCheck, Wifi } from 'lucide-react-native';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { subscribeToNetworkStatus } from '../services/networkMonitor';
 import { usePulseStore } from '../store/usePulseStore';
 import { useAdaptiveLayout } from '../theme/adaptive';
 import { COLORS } from '../theme/colors';
@@ -12,11 +13,20 @@ export function OperationalHeader() {
   const layout = useAdaptiveLayout();
 
   const networkMode = usePulseStore((s) => s.networkMode);
+  const networkInfo = usePulseStore((s) => s.networkInfo);
   const isSyncing = usePulseStore((s) => s.isSyncing);
   const isUnlocked = usePulseStore((s) => s.isUnlocked);
   const authMethod = usePulseStore((s) => s.authMethod);
   const operations = usePulseStore((s) => s.operations);
-  const toggleNetworkMode = usePulseStore((s) => s.toggleNetworkMode);
+  const applyRealNetworkStatus = usePulseStore((s) => s.applyRealNetworkStatus);
+  const refreshNetworkStatus = usePulseStore((s) => s.refreshNetworkStatus);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToNetworkStatus((status) => {
+      void applyRealNetworkStatus(status);
+    });
+    return unsubscribe;
+  }, [applyRealNetworkStatus]);
 
   const pendingCount = operations.filter(
     (op) => op.syncStatus === 'QUEUED_LOCAL' || op.syncStatus === 'SYNC_FAILED'
@@ -24,9 +34,10 @@ export function OperationalHeader() {
 
   const isOnline = networkMode === 'ONLINE';
 
-  const handleNetworkToggle = async () => {
-    await triggerHaptic(isOnline ? 'warning' : 'success');
-    await toggleNetworkMode();
+  const handleRefreshNetwork = async () => {
+    await triggerHaptic('light');
+    const latest = await refreshNetworkStatus();
+    await triggerHaptic(latest.isOffline ? 'warning' : 'success');
   };
 
   const handleOpenSecurity = async () => {
@@ -34,25 +45,17 @@ export function OperationalHeader() {
     router.push('/lock');
   };
 
-  const authBadgeLabel = !isUnlocked
-    ? 'LOCK'
-    : authMethod === 'BIOMETRIC'
-    ? 'BIO'
-    : authMethod === 'PIN'
-    ? 'PIN'
-    : 'DEMO';
+  const authBadgeLabel = !isUnlocked ? 'LOCK' : authMethod === 'BIOMETRIC' ? 'BIO' : 'PIN';
 
-  const networkLabel = layout.isCompact
-    ? isOnline
-      ? isSyncing
-        ? 'SYNC'
-        : 'ONLINE'
-      : 'OFFLINE'
-    : isOnline
-    ? isSyncing
-      ? 'SYNCING'
-      : 'ONLINE'
-    : 'OFFLINE AIRPLANE';
+  const networkLabel = isSyncing
+    ? 'SYNCING'
+    : !isOnline
+    ? layout.isCompact
+      ? 'OFFLINE'
+      : 'AIRPLANE / OFFLINE'
+    : networkInfo.type !== 'UNKNOWN'
+    ? networkInfo.type
+    : 'ONLINE';
 
   return (
     <View
@@ -75,17 +78,23 @@ export function OperationalHeader() {
               ]}
             />
             <Text
-              style={[styles.brandTitle, { fontSize: layout.isCompact ? 13 : 15 }]}
+              style={[
+                styles.brandTitle,
+                { fontSize: layout.clampFont(layout.isCompact ? 13 : 15) },
+              ]}
               numberOfLines={1}
             >
               PULSE // MOBILE
             </Text>
             <View style={styles.versionBadge}>
-              <Text style={styles.versionText}>V1.0</Text>
+              <Text style={styles.versionText} numberOfLines={1}>
+                V2.0
+              </Text>
             </View>
           </View>
           <Text style={styles.subline} numberOfLines={1}>
-            {layout.breakpoint.toUpperCase()} • {layout.columns}COL • {layout.platform.toUpperCase()}
+            {layout.breakpoint.toUpperCase()} • {layout.columns}COL
+            {!layout.isCompact && networkInfo.ipAddress ? ` • ${networkInfo.ipAddress}` : ''}
           </Text>
         </View>
 
@@ -93,7 +102,7 @@ export function OperationalHeader() {
           <Pressable
             onPress={handleOpenSecurity}
             accessibilityRole="button"
-            accessibilityLabel="Biometric Security Gate"
+            accessibilityLabel="Security Clearance Gate"
             style={({ pressed }) => [
               styles.securityButton,
               {
@@ -106,24 +115,25 @@ export function OperationalHeader() {
             ]}
           >
             {isUnlocked ? (
-              <ShieldCheck size={16} color={COLORS.online} />
+              <ShieldCheck size={15} color={COLORS.online} />
             ) : (
-              <Lock size={16} color={COLORS.offline} />
+              <Lock size={15} color={COLORS.offline} />
             )}
             <Text
               style={[
                 styles.securityText,
                 { color: isUnlocked ? COLORS.online : COLORS.offline },
               ]}
+              numberOfLines={1}
             >
               {authBadgeLabel}
             </Text>
           </Pressable>
 
           <Pressable
-            onPress={handleNetworkToggle}
+            onPress={handleRefreshNetwork}
             accessibilityRole="button"
-            accessibilityLabel="Toggle Online or Offline Airplane Mode"
+            accessibilityLabel="Refresh Real Device Network State"
             style={({ pressed }) => [
               styles.networkButton,
               {
@@ -135,21 +145,22 @@ export function OperationalHeader() {
             ]}
           >
             {isSyncing ? (
-              <RefreshCw size={15} color={COLORS.online} />
+              <RefreshCw size={14} color={COLORS.online} />
             ) : isOnline ? (
-              <Wifi size={15} color={COLORS.online} />
+              <Wifi size={14} color={COLORS.online} />
             ) : (
-              <Plane size={15} color={COLORS.offline} />
+              <Plane size={14} color={COLORS.offline} />
             )}
             <Text
               style={[
                 styles.networkText,
                 { color: isOnline ? COLORS.online : COLORS.offline },
               ]}
+              numberOfLines={1}
             >
               {networkLabel}
             </Text>
-            {pendingCount > 0 && (
+            {pendingCount > 0 ? (
               <View
                 style={[
                   styles.queueCountPill,
@@ -158,7 +169,7 @@ export function OperationalHeader() {
               >
                 <Text style={styles.queueCountText}>{pendingCount}</Text>
               </View>
-            )}
+            ) : null}
           </Pressable>
         </View>
       </View>
@@ -182,7 +193,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   brandBlock: {
-    flexShrink: 1,
+    flex: 1,
+    minWidth: 0,
     gap: 2,
   },
   brandRow: {
@@ -194,11 +206,13 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
+    flexShrink: 0,
   },
   brandTitle: {
     color: COLORS.textPrimary,
     fontWeight: '800',
-    letterSpacing: 0.8,
+    letterSpacing: 0.6,
+    flexShrink: 1,
   },
   versionBadge: {
     backgroundColor: COLORS.surfaceElevated,
@@ -207,6 +221,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 5,
     paddingVertical: 1,
     borderRadius: 4,
+    flexShrink: 0,
   },
   versionText: {
     color: COLORS.textSecondary,
@@ -218,12 +233,14 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 10,
     fontWeight: '600',
-    letterSpacing: 0.6,
+    letterSpacing: 0.4,
+    flexShrink: 1,
   },
   actionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
   securityButton: {
     flexDirection: 'row',
@@ -237,21 +254,23 @@ const styles = StyleSheet.create({
   securityText: {
     fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
   },
   networkButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
+    gap: 5,
+    paddingHorizontal: 10,
     borderRadius: 8,
     borderWidth: 1,
+    maxWidth: 170,
   },
   networkText: {
     fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
+    flexShrink: 1,
   },
   queueCountPill: {
     minWidth: 18,
@@ -260,6 +279,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 4,
+    flexShrink: 0,
   },
   queueCountText: {
     color: COLORS.primaryText,

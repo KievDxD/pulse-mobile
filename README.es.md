@@ -1,8 +1,8 @@
-# PULSE // MOBILE (Release V1.0)
+# PULSE // MOBILE (Release V2.0 Production)
 
-Aplicación móvil nativa multiplataforma de operaciones en campo con arquitectura **Offline-First**, **diseño adaptativo multi-dispositivo** y **seguridad biométrica respaldada por hardware**, construida con **React Native**, **Expo SDK 58**, **Expo Router**, **TypeScript estricto** y **Zustand + AsyncStorage**.
+Aplicación móvil nativa multiplataforma de operaciones en campo con arquitectura **Offline-First**, sensores reales del dispositivo (**GPS, Cámara QR/Códigos de Barra, Estado Real de Red, Biometría por Hardware**) y criptografía nativa **SHA-256**, construida con **React Native**, **Expo SDK 58**, **Expo Router**, **TypeScript estricto** y **Zustand + AsyncStorage**.
 
-Diseñada bajo una estética **Industrial Mobile** de alto contraste (`#09090B` de fondo, tarjetas `#111114`, bordes estructurales `1px`, áreas táctiles mínimas de `48x48dp` conforme a Apple HIG y Material Design 3, y retroalimentación háptica con `expo-haptics`).
+Diseñada bajo una estética **Industrial Mobile** de alto contraste (`#09090B` de fondo, tarjetas `#111114`, áreas táctiles mínimas de `48x48dp` conforme a Apple HIG y Material Design 3, manejo completo de Safe Areas y retroalimentación háptica).
 
 ---
 
@@ -12,95 +12,76 @@ Diseñada bajo una estética **Industrial Mobile** de alto contraste (`#09090B` 
 pulse-mobile/
 ├── app/
 │   ├── _layout.tsx                 # SafeAreaProvider, StatusBar oscura y Stack de Expo Router
-│   ├── lock.tsx                    # Compuerta biométrica (FaceID/TouchID) + PIN (2026) + 1-Click Demo
+│   ├── lock.tsx                    # Lanzamiento biométrico automático + Registro de PIN cifrado en SecureStore
 │   └── (tabs)/
-│       ├── _layout.tsx             # OperationalHeader persistente + barra inferior de 4 pestañas
-│       ├── index.tsx               # Command: KPIs adaptativos, motor de sincronización y feed reciente
-│       ├── capture.tsx             # Capture: Formulario ergonómico, GPS y escáner QR háptico
-│       ├── queue.tsx               # Sync Queue: Auditoría de paquetes, SHA-256, fallo simulado y reintento
-│       └── device.tsx              # Device Lab: Inspector de métricas vivas y simulador multi-dispositivo
+│       ├── _layout.tsx             # OperationalHeader persistente + barra inferior dinámica con insets.bottom
+│       ├── index.tsx               # Command: KPIs vivos, Empty State limpio, estado real de red y cola
+│       ├── capture.tsx             # Capture: GPS real (expo-location) + Escáner QR (expo-camera) + SHA-256
+│       ├── queue.tsx               # Sync Queue: Auditoría, exportación JSON/CSV (expo-sharing) y reintentos
+│       └── device.tsx              # Device Lab: Telemetría de sensores, Endpoint HTTP y Simulador Viewport
 ├── src/
 │   ├── components/
-│   │   ├── OperationalHeader.tsx   # Selector ONLINE / OFFLINE AIRPLANE en tiempo real + estado de seguridad
-│   │   └── OperationCard.tsx       # Tarjeta reutilizable de operación con digest SHA-256 y reintento
+│   │   ├── OperationalHeader.tsx   # Listener real OS (WIFI/CELLULAR/OFFLINE) + compuerta de seguridad
+│   │   └── OperationCard.tsx       # Tarjeta anti-desbordamiento con GPS, SHA-256 y modo de transporte
 │   ├── services/
-│   │   └── biometricAuth.ts        # expo-local-authentication + expo-secure-store + PIN 2026
+│   │   ├── biometricAuth.ts        # expo-local-authentication + PIN SHA-256 en expo-secure-store
+│   │   ├── networkMonitor.ts       # expo-network (conectividad real, IPv4 y auto-sync al salir de Modo Avión)
+│   │   ├── syncClient.ts           # Cliente HTTP real (timeout + backoff exponencial) y ledger verificado
+│   │   └── auditExporter.ts        # Exportación JSON/CSV con expo-file-system y expo-sharing
 │   ├── store/
-│   │   └── usePulseStore.ts        # Store Zustand Offline-First persistido en AsyncStorage
+│   │   └── usePulseStore.ts        # Store Zustand Offline-First persistido en AsyncStorage (inicio limpio)
 │   ├── theme/
-│   │   ├── adaptive.ts             # Hook useAdaptiveLayout() y motor calculateAdaptiveMetrics()
-│   │   └── colors.ts               # Tokens de paleta industrial de alto contraste
+│   │   ├── adaptive.ts             # useAdaptiveLayout(), clampFont(), maxContentWidth=960 y Safe Areas
+│   │   └── colors.ts               # Paleta industrial de alto contraste
+│   ├── types/
+│   │   └── operations.ts           # Contratos TypeScript compartidos y serializador canónico
 │   └── utils/
-│       ├── hash.ts                 # Cómputo SHA-256 determinístico en TypeScript puro
+│       ├── hash.ts                 # Digest SHA-256 real con expo-crypto y verificación de integridad
 │       └── haptics.ts              # Wrapper seguro de expo-haptics para iOS/Android
 └── __tests__/
-    ├── adaptive.test.ts            # Pruebas de breakpoints, orientación, insets y áreas táctiles
-    ├── syncEngine.test.ts          # Pruebas del motor Offline-First, auto-sync, fallos y reintentos
-    └── biometricAuth.test.ts       # Pruebas de biometría, PIN 2026 e Instant Demo Unlock
+    ├── adaptive.test.ts            # Pruebas de breakpoints, Safe Areas horizontales, clampFont y 960dp
+    ├── syncEngine.test.ts          # Pruebas de red real, backoff HTTP, SHA-256 y exportación JSON/CSV
+    └── biometricAuth.test.ts       # Pruebas de biometría por hardware y enrolamiento de PIN en SecureStore
 ```
 
 ---
 
-## Pilares de Ingeniería
+## Capacidades de Producción V2.0 (Cero Datos Falsos / Cero Botones Demo)
 
-### 1. Motor de Adaptabilidad Multi-Dispositivo (`src/theme/adaptive.ts`)
-El hook `useAdaptiveLayout()` combina `useWindowDimensions()` y `useSafeAreaInsets()` sobre la función pura `calculateAdaptiveMetrics()` para recalcular la UI en tiempo real:
+### 1. Sensores Reales y Criptografía Nativa
+- **Biometría y PIN Cifrado (`src/services/biometricAuth.ts` + `app/lock.tsx`)**: Inspecciona `LocalAuthentication.hasHardwareAsync()` / `isEnrolledAsync()` y lanza la verificación biométrica automáticamente al abrir la app. En el primer ingreso permite configurar un PIN personal de 4 dígitos, hasheado con SHA-256 y guardado en `expo-secure-store`.
+- **Conectividad Real (`src/services/networkMonitor.ts`)**: Escucha en tiempo real Wi-Fi, Datos Móviles y Modo Avión mediante `expo-network` (`getNetworkStateAsync`, `getIpAddressAsync`, `addNetworkStateListener`), sincronizando automáticamente al recuperar conexión.
+- **GPS por Hardware (`app/(tabs)/capture.tsx`)**: Solicita permisos de ubicación (`expo-location`) y captura `latitude`, `longitude`, precisión (`accuracy` en metros) y altitud (`altitude`), con respaldo manual si se deniega el permiso.
+- **Escáner QR / Códigos de Barra Real (`app/(tabs)/capture.tsx`)**: Utiliza `CameraView` de `expo-camera` (`['qr', 'code128', 'ean13']`) con respuesta háptica al escanear checkpoints físicos.
+- **Integridad SHA-256 Real (`src/utils/hash.ts`)**: Sella cada registro con `Crypto.digestStringAsync(SHA256)` de `expo-crypto` y valida la firma antes y después de sincronizar.
 
-| Breakpoint | Rango de Ancho | Columnas Vertical (`portrait`) | Columnas Horizontal (`landscape`) |
-| :--- | :--- | :--- | :--- |
-| **`compact`** | `< 380 dp` | `1` columna | `1` columna |
-| **`standard`** | `380 – 599 dp` | `1` columna | `2` columnas (`3` si `>= 900 dp`) |
-| **`tablet`** | `>= 600 dp` | `2` columnas | `3` columnas |
+### 2. Conector HTTP Real y Exportación de Auditoría (`src/services/syncClient.ts`, `src/services/auditExporter.ts`)
+- Permite configurar un endpoint REST externo en **Device Lab** para enviar registros por `fetch` con `AbortController` (timeout) y reintentos con backoff exponencial.
+- Cuando no hay servidor remoto configurado, persiste las operaciones en el ledger transaccional local verificado con lectura posterior SHA-256.
+- Exporta el historial completo con hashes SHA-256 y coordenadas GPS en **JSON** o **CSV** usando `expo-file-system` + `expo-sharing` (o descarga directa en navegador Web).
 
-- **Accesibilidad y Ergonomía**: Limita el escalado tipográfico del sistema al rango `[0.85, 1.35]` y garantiza `MIN_TOUCH_TARGET_DP = 48` en botones y controles.
-- **Áreas Seguras**: Calcula `safePadding` contemplando notches, Dynamic Island en iOS y barras de navegación por gestos en Android.
-
-### 2. Motor Offline-First con Cola de Sincronización (`src/store/usePulseStore.ts`)
-- **Datos Iniciales Realistas**: Precarga 6 operaciones de campo (`INITIAL_OPERATIONS`) con prioridades `CRITICAL`, `HIGH` y `NORMAL`.
-- **Modo Avión / Sin Conexión**: Al activar **OFFLINE AIRPLANE** en el encabezado, los nuevos reportes se almacenan localmente en `AsyncStorage` con estado `QUEUED_LOCAL` y firma de integridad `sha256:...` (`src/utils/hash.ts`).
-- **Sincronización Secuencial al Reconectar**: Al volver a **ONLINE**, el motor procesa secuencialmente los paquetes pendientes (`QUEUED_LOCAL` -> `SYNCING` -> `SYNCED_CLOUD`), calculando latencia (`ms`) y registrando `syncedAt`.
-- **Simulación de Fallos y Reintentos**: Permite inyectar caídas de red (`SYNC_FAILED` con incremento de `retryCount`) y recuperar paquetes individuales mediante `retryOperation()`.
-
-### 3. Seguridad Biométrica y PIN (`src/services/biometricAuth.ts` + `app/lock.tsx`)
-- Utiliza `expo-local-authentication` (huella dactilar / Face ID) y almacenamiento cifrado en `expo-secure-store` (Keychain en iOS / Android Keystore AES-256), con respaldo seguro para navegador.
-- Incluye PIN de respaldo **`2026`** y el botón **Instant Demo Unlock (1-Click)** para acceso inmediato en emuladores o navegador web.
+### 3. Corrección Total de Resolución y Safe Areas (`src/theme/adaptive.ts`)
+- Centra el contenido en tablets/pantallas anchas con `maxContentWidth = 960` y adapta columnas (`1 | 2 | 3`) en `compact` (`< 380dp`), `standard` (`380–599dp`) y `tablet` (`>= 600dp`).
+- Aplica explícitamente `insets.top`, `insets.bottom`, `insets.left` y `insets.right` (cubriendo rotación horizontal con notches y barras de navegación inferiores mediante `tabBarHeight` dinámico y `scrollBottomPadding = insets.bottom + 96`).
+- Incorpora `clampFont()` (`[0.85, 1.35]`) y `flexShrink: 1` en filas horizontales para evitar desbordamientos o textos cortados desde `320dp` hasta `1024dp+`.
 
 ---
 
 ## Ejecución y Verificación
 
-### Requisitos
-- Node.js 20+ (verificado en Node v24)
-- App Expo Go (iOS / Android) o emulador Android Studio / iOS Simulator
-
-### Instalación
 ```bash
+# Instalar dependencias
 npm install
-```
 
-### Ejecución en Android, iOS y Web
-```bash
-# Iniciar servidor de desarrollo Expo
+# Iniciar servidor Expo (Android, iOS, Web)
 npm start
 
-# Ejecutar en emulador Android
-npm run android
-
-# Ejecutar en simulador iOS (macOS)
-npm run ios
-
-# Ejecutar vista previa Web
-npm run web
-```
-
-### Verificación de Calidad y Compilación
-```bash
-# 1. Validación estricta de TypeScript
+# Verificación estricta de TypeScript (0 errores)
 npx tsc --noEmit
 
-# 2. Suite automatizada de pruebas en Jest (19 tests)
+# Ejecutar suite de pruebas automatizadas Jest (22 tests)
 npm test -- --watchAll=false
 
-# 3. Exportación del bundle multiplataforma (Web / Metro)
+# Exportar bundle multiplataforma Web / Metro
 npx expo export --platform web
 ```

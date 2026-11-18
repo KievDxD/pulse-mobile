@@ -31,8 +31,11 @@ export interface AdaptiveMetrics {
   columns: GridColumns;
   minTouchTarget: number;
   clampedFontScale: number;
+  clampFont: (size: number) => number;
   insets: SafeInsets;
   safePadding: SafeInsets;
+  scrollBottomPadding: number;
+  tabBarHeight: number;
   spacing: {
     xs: number;
     sm: number;
@@ -89,7 +92,7 @@ export const DEVICE_PRESETS: DevicePreset[] = [
     height: 915,
     insetsPortrait: { top: 36, bottom: 24, left: 0, right: 0 },
     insetsLandscape: { top: 24, bottom: 16, left: 36, right: 36 },
-    hardwareNote: 'Biometric Strong • Android Gesture Bar',
+    hardwareNote: 'Biometric Strong • Android Gesture Bar & Cutout',
   },
   {
     id: 'ipad-tablet',
@@ -105,6 +108,7 @@ export const DEVICE_PRESETS: DevicePreset[] = [
 ];
 
 export const MIN_TOUCH_TARGET_DP = 48;
+export const MAX_CONTENT_WIDTH_DP = 960;
 
 export function normalizePlatform(os: string = Platform.OS): TargetPlatform {
   if (os === 'ios') return 'ios';
@@ -118,6 +122,14 @@ export function clampFontScale(scale: number = 1): number {
 }
 
 /**
+ * Scales and clamps typography sizes to honor accessibility preferences without overflowing cards.
+ */
+export function clampFont(size: number, fontScale: number = 1): number {
+  const clampedScale = clampFontScale(fontScale);
+  return Math.round(size * clampedScale);
+}
+
+/**
  * Pure layout calculation engine that derives breakpoints, multi-column grids,
  * safe-area paddings, touch targets, and accessible typography metrics.
  */
@@ -126,7 +138,13 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
   const height = Math.max(240, Math.round(input.height));
   const platform = input.platform ?? normalizePlatform();
   const clampedFontScale = clampFontScale(input.fontScale ?? 1);
-  const insets: SafeInsets = input.insets ?? { top: 0, bottom: 0, left: 0, right: 0 };
+  const rawInsets: SafeInsets = input.insets ?? { top: 0, bottom: 0, left: 0, right: 0 };
+  const insets: SafeInsets = {
+    top: Math.max(0, rawInsets.top),
+    bottom: Math.max(0, rawInsets.bottom),
+    left: Math.max(0, rawInsets.left),
+    right: Math.max(0, rawInsets.right),
+  };
 
   let breakpoint: DeviceBreakpoint = 'standard';
   if (width < 380) {
@@ -157,18 +175,20 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
   const safePadding: SafeInsets = {
     top: insets.top + (platform === 'ios' ? 6 : 8),
     bottom: Math.max(insets.bottom, 12),
-    left: insets.left + horizontalBase,
-    right: insets.right + horizontalBase,
+    left: Math.max(insets.left + (insets.left > 0 ? 8 : 0), horizontalBase),
+    right: Math.max(insets.right + (insets.right > 0 ? 8 : 0), horizontalBase),
   };
 
+  const scrollBottomPadding = insets.bottom + 96;
+  const tabBarHeight = 58 + Math.max(insets.bottom, 8);
   const gutter = breakpoint === 'compact' ? 10 : breakpoint === 'tablet' ? 16 : 12;
   const cardPadding = breakpoint === 'compact' ? 12 : breakpoint === 'tablet' ? 18 : 14;
-  const maxContentWidth = breakpoint === 'tablet' ? 1160 : 720;
+  const maxContentWidth = MAX_CONTENT_WIDTH_DP;
 
-  const scale = (size: number) => Math.round(size * clampedFontScale);
+  const scale = (size: number) => clampFont(size, clampedFontScale);
 
   const typography = {
-    hero: scale(breakpoint === 'compact' ? 22 : breakpoint === 'tablet' ? 28 : 25),
+    hero: scale(breakpoint === 'compact' ? 22 : breakpoint === 'tablet' ? 28 : 24),
     title: scale(breakpoint === 'compact' ? 17 : breakpoint === 'tablet' ? 21 : 19),
     subtitle: scale(breakpoint === 'compact' ? 14 : 16),
     body: scale(breakpoint === 'compact' ? 13 : 14),
@@ -186,8 +206,11 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
     columns,
     minTouchTarget: MIN_TOUCH_TARGET_DP,
     clampedFontScale,
+    clampFont: scale,
     insets,
     safePadding,
+    scrollBottomPadding,
+    tabBarHeight,
     spacing,
     gutter,
     cardPadding,

@@ -1,13 +1,17 @@
+import { useRouter } from 'expo-router';
 import {
-  AlertTriangle,
   Database,
+  Download,
+  FileSpreadsheet,
+  Plus,
   RefreshCw,
-  RotateCcw,
+  Trash2,
   WifiOff,
 } from 'lucide-react-native';
 import React, { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { OperationCard } from '../../src/components/OperationCard';
+import { AuditExportFormat, exportOperationsAudit } from '../../src/services/auditExporter';
 import { usePulseStore } from '../../src/store/usePulseStore';
 import { useAdaptiveLayout } from '../../src/theme/adaptive';
 import { COLORS } from '../../src/theme/colors';
@@ -24,26 +28,25 @@ const FILTERS: { id: QueueFilter; label: string }[] = [
 ];
 
 export default function QueueScreen() {
+  const router = useRouter();
   const layout = useAdaptiveLayout();
 
   const operations = usePulseStore((s) => s.operations);
   const networkMode = usePulseStore((s) => s.networkMode);
   const isSyncing = usePulseStore((s) => s.isSyncing);
-  const simulatedFaultMode = usePulseStore((s) => s.simulatedFaultMode);
   const syncQueue = usePulseStore((s) => s.syncQueue);
   const retryOperation = usePulseStore((s) => s.retryOperation);
-  const simulateNetworkFailure = usePulseStore((s) => s.simulateNetworkFailure);
-  const setSimulatedFaultMode = usePulseStore((s) => s.setSimulatedFaultMode);
-  const resetDemoData = usePulseStore((s) => s.resetDemoData);
+  const clearAllOperations = usePulseStore((s) => s.clearAllOperations);
 
   const [filter, setFilter] = useState<QueueFilter>('ALL');
   const [auditNotice, setAuditNotice] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const estimatedWidth =
     Math.min(layout.width, layout.maxContentWidth) -
     layout.safePadding.left -
     layout.safePadding.right;
-  const [contentWidth, setContentWidth] = useState<number>(Math.max(280, estimatedWidth));
+  const [contentWidth, setContentWidth] = useState<number>(Math.max(260, estimatedWidth));
 
   const counts = useMemo(() => {
     let queued = 0;
@@ -76,48 +79,58 @@ export default function QueueScreen() {
   const handleSyncAll = async () => {
     if (networkMode === 'OFFLINE') {
       await triggerHaptic('warning');
-      setAuditNotice('Device is in OFFLINE AIRPLANE MODE. Switch header to ONLINE to flush packets.');
+      setAuditNotice(
+        'Device is offline. Restore Wi-Fi or Cellular connectivity to replicate queued packets.'
+      );
       return;
     }
     await triggerHaptic('medium');
-    if (simulatedFaultMode) {
-      setSimulatedFaultMode(false);
-    }
     const res = await syncQueue();
     await triggerHaptic(res.failed > 0 ? 'error' : 'success');
     setAuditNotice(
-      `Sequential sync finished: ${res.synced} packet(s) replicated to cloud, ${res.failed} failed.`
+      `Sync completed: ${res.synced} packet(s) verified and replicated, ${res.failed} failed.`
     );
   };
 
-  const handleSimulateFault = async () => {
-    await triggerHaptic('error');
-    const faulted = simulateNetworkFailure();
-    setFilter('ALL');
-    setAuditNotice(
-      `Injected uplink fault on ${faulted.code} (retry #${faulted.retryCount}). Tap RETRY PACKET UPLINK to recover.`
-    );
+  const handleExport = async (format: AuditExportFormat) => {
+    if (operations.length === 0 || exporting) {
+      await triggerHaptic('warning');
+      setAuditNotice('No records available to export yet.');
+      return;
+    }
+
+    setExporting(true);
+    await triggerHaptic('light');
+    const result = await exportOperationsAudit(operations, format);
+    setExporting(false);
+
+    if (result.ok) {
+      await triggerHaptic('success');
+      setAuditNotice(
+        `Exported ${result.recordCount} record(s) to ${result.filename} (${result.method}).`
+      );
+    } else {
+      await triggerHaptic('error');
+      setAuditNotice(result.error ?? 'Audit export failed.');
+    }
   };
 
   const handleRetryPacket = async (id: string) => {
     await triggerHaptic('light');
-    if (simulatedFaultMode) {
-      setSimulatedFaultMode(false);
-    }
     const ok = await retryOperation(id);
     await triggerHaptic(ok ? 'success' : 'warning');
     setAuditNotice(
       ok
-        ? 'Packet uplink recovered and acknowledged by cloud gateway.'
-        : 'Retry deferred: device is currently in OFFLINE AIRPLANE MODE.'
+        ? 'Packet uplink verified with SHA-256 and replicated.'
+        : 'Packet retry deferred or failed — check endpoint URL and network connectivity.'
     );
   };
 
-  const handleReset = async () => {
-    await triggerHaptic('light');
-    resetDemoData();
+  const handleClearAll = async () => {
+    await triggerHaptic('warning');
+    clearAllOperations();
     setFilter('ALL');
-    setAuditNotice('Demo dataset restored to initial 6 field operations.');
+    setAuditNotice('Local operations queue cleared.');
   };
 
   return (
@@ -125,7 +138,7 @@ export default function QueueScreen() {
       style={styles.root}
       contentContainerStyle={{
         paddingTop: layout.spacing.md,
-        paddingBottom: layout.spacing.xl + 20,
+        paddingBottom: layout.scrollBottomPadding,
         paddingLeft: layout.safePadding.left,
         paddingRight: layout.safePadding.right,
       }}
@@ -140,12 +153,12 @@ export default function QueueScreen() {
         }}
       >
         <View style={styles.headerRow}>
-          <View>
-            <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]}>
-              Sync Queue Audit
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]} numberOfLines={1}>
+              Sync Queue & SHA-256 Audit
             </Text>
-            <Text style={styles.screenSubtitle}>
-              Local AsyncStorage packet buffer vs Cloud SHA-256 ledger
+            <Text style={styles.screenSubtitle} numberOfLines={2}>
+              Local AsyncStorage buffer, HTTP replication & cryptographic audit export
             </Text>
           </View>
         </View>
@@ -154,19 +167,19 @@ export default function QueueScreen() {
         <View style={[styles.summaryCard, { padding: layout.cardPadding }]}>
           <View style={styles.summaryRow}>
             <View style={styles.summaryStat}>
-              <Text style={styles.summaryLabel}>QUEUED LOCAL</Text>
+              <Text style={styles.summaryLabel}>QUEUED</Text>
               <Text style={[styles.summaryVal, { color: COLORS.offline }]}>{counts.queued}</Text>
             </View>
             <View style={styles.summaryStat}>
-              <Text style={styles.summaryLabel}>CLOUD SYNCED</Text>
+              <Text style={styles.summaryLabel}>VERIFIED</Text>
               <Text style={[styles.summaryVal, { color: COLORS.online }]}>{counts.synced}</Text>
             </View>
             <View style={styles.summaryStat}>
-              <Text style={styles.summaryLabel}>SYNC FAILED</Text>
+              <Text style={styles.summaryLabel}>FAILED</Text>
               <Text style={[styles.summaryVal, { color: COLORS.critical }]}>{counts.failed}</Text>
             </View>
             <View style={styles.summaryStat}>
-              <Text style={styles.summaryLabel}>LEDGER SIZE</Text>
+              <Text style={styles.summaryLabel}>PAYLOAD</Text>
               <Text style={[styles.summaryVal, { color: COLORS.textPrimary }]}>
                 {counts.totalBytes}B
               </Text>
@@ -176,7 +189,7 @@ export default function QueueScreen() {
           <View style={[styles.actionsWrap, layout.isCompact && styles.actionsCol]}>
             <Pressable
               onPress={handleSyncAll}
-              disabled={isSyncing}
+              disabled={isSyncing || counts.queued + counts.failed === 0}
               accessibilityRole="button"
               accessibilityLabel="Sync Pending Queue"
               style={({ pressed }) => [
@@ -184,7 +197,8 @@ export default function QueueScreen() {
                 {
                   minHeight: layout.minTouchTarget,
                   flex: layout.isCompact ? undefined : 1,
-                  opacity: pressed || isSyncing ? 0.8 : 1,
+                  opacity:
+                    pressed || isSyncing || counts.queued + counts.failed === 0 ? 0.65 : 1,
                 },
               ]}
             >
@@ -193,36 +207,65 @@ export default function QueueScreen() {
               ) : (
                 <RefreshCw size={15} color={COLORS.primaryText} />
               )}
-              <Text style={styles.primaryButtonText}>
+              <Text style={styles.primaryButtonText} numberOfLines={1}>
                 {isSyncing ? 'SYNCING PACKETS...' : 'SYNC PENDING QUEUE'}
               </Text>
             </Pressable>
 
             <Pressable
-              onPress={handleSimulateFault}
+              onPress={() => handleExport('json')}
+              disabled={exporting || operations.length === 0}
               accessibilityRole="button"
-              accessibilityLabel="Simulate Network Fault"
+              accessibilityLabel="Export Audit JSON"
               style={({ pressed }) => [
-                styles.faultButton,
-                { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
+                styles.secondaryButton,
+                {
+                  minHeight: layout.minTouchTarget,
+                  opacity: pressed || exporting || operations.length === 0 ? 0.6 : 1,
+                },
               ]}
             >
-              <AlertTriangle size={15} color={COLORS.critical} />
-              <Text style={styles.faultButtonText}>SIMULATE FAULT</Text>
+              <Download size={15} color={COLORS.textPrimary} />
+              <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                EXPORT JSON
+              </Text>
             </Pressable>
 
             <Pressable
-              onPress={handleReset}
+              onPress={() => handleExport('csv')}
+              disabled={exporting || operations.length === 0}
               accessibilityRole="button"
-              accessibilityLabel="Reset Demo Data"
+              accessibilityLabel="Export Audit CSV"
               style={({ pressed }) => [
                 styles.secondaryButton,
-                { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
+                {
+                  minHeight: layout.minTouchTarget,
+                  opacity: pressed || exporting || operations.length === 0 ? 0.6 : 1,
+                },
               ]}
             >
-              <RotateCcw size={15} color={COLORS.textSecondary} />
-              <Text style={styles.secondaryButtonText}>RESET</Text>
+              <FileSpreadsheet size={15} color={COLORS.textPrimary} />
+              <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                EXPORT CSV
+              </Text>
             </Pressable>
+
+            {operations.length > 0 ? (
+              <Pressable
+                onPress={handleClearAll}
+                accessibilityRole="button"
+                accessibilityLabel="Clear Operations Ledger"
+                style={({ pressed }) => [
+                  styles.clearButton,
+                  { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
+                ]}
+              >
+                <Trash2 size={15} color={COLORS.critical} />
+                <Text style={styles.clearButtonText} numberOfLines={1}>
+                  CLEAR
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
 
           {auditNotice ? (
@@ -263,6 +306,7 @@ export default function QueueScreen() {
                     styles.filterText,
                     { color: active ? COLORS.primaryText : COLORS.textSecondary },
                   ]}
+                  numberOfLines={1}
                 >
                   {item.label}
                 </Text>
@@ -271,12 +315,33 @@ export default function QueueScreen() {
           })}
         </ScrollView>
 
-        {/* Filtered Packet Cards */}
-        {filteredOperations.length === 0 ? (
+        {/* Filtered Packet Cards or Empty State */}
+        {operations.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Database size={26} color={COLORS.textSecondary} />
+            <Text style={styles.emptyTitle}>Sync Queue Empty</Text>
+            <Text style={styles.emptySubtitle}>
+              Capture a field inspection with real GPS coordinates and QR checkpoint verification to
+              inspect its SHA-256 replication lifecycle here.
+            </Text>
+            <Pressable
+              onPress={() => router.push('/(tabs)/capture')}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                { minHeight: layout.minTouchTarget, paddingHorizontal: 18, opacity: pressed ? 0.85 : 1 },
+              ]}
+            >
+              <Plus size={16} color={COLORS.primaryText} />
+              <Text style={styles.primaryButtonText} numberOfLines={1}>
+                GO TO CAPTURE
+              </Text>
+            </Pressable>
+          </View>
+        ) : filteredOperations.length === 0 ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>No packets match filter "{filter}"</Text>
             <Text style={styles.emptySubtitle}>
-              Switch filter to ALL or create a new field report in the Capture tab.
+              Switch filter to ALL to view all recorded field operations.
             </Text>
           </View>
         ) : (
@@ -322,6 +387,7 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 12,
     marginTop: 2,
+    flexShrink: 1,
   },
   summaryCard: {
     backgroundColor: COLORS.card,
@@ -337,7 +403,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   summaryStat: {
-    minWidth: 72,
+    minWidth: 68,
     gap: 2,
   },
   summaryLabel: {
@@ -373,23 +439,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
     letterSpacing: 0.5,
-  },
-  faultButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: COLORS.criticalBg,
-    borderWidth: 1,
-    borderColor: COLORS.criticalBorder,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-  },
-  faultButtonText: {
-    color: COLORS.critical,
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.5,
+    flexShrink: 1,
   },
   secondaryButton: {
     flexDirection: 'row',
@@ -403,10 +453,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   secondaryButtonText: {
-    color: COLORS.textSecondary,
+    color: COLORS.textPrimary,
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
+  },
+  clearButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: COLORS.criticalBg,
+    borderWidth: 1,
+    borderColor: COLORS.criticalBorder,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
+  clearButtonText: {
+    color: COLORS.critical,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    flexShrink: 1,
   },
   noticeBox: {
     flexDirection: 'row',
@@ -422,6 +491,7 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 12,
     flex: 1,
+    flexShrink: 1,
     lineHeight: 17,
   },
   filterRow: {
@@ -446,17 +516,20 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 24,
     alignItems: 'center',
-    gap: 6,
+    gap: 10,
   },
   emptyTitle: {
     color: COLORS.textPrimary,
     fontSize: 15,
-    fontWeight: '700',
+    fontWeight: '800',
+    textAlign: 'center',
   },
   emptySubtitle: {
     color: COLORS.textSecondary,
-    fontSize: 12,
+    fontSize: 13,
+    lineHeight: 19,
     textAlign: 'center',
+    maxWidth: 420,
   },
   grid: {
     flexDirection: 'row',

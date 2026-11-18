@@ -1,14 +1,17 @@
+import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
+import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import {
+  Camera,
   CheckCircle2,
   Crosshair,
   QrCode,
   Radio,
   Send,
   ShieldCheck,
-  Sparkles,
+  X,
 } from 'lucide-react-native';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import {
   Coordinates,
@@ -19,7 +22,11 @@ import {
 import { useAdaptiveLayout } from '../../src/theme/adaptive';
 import { COLORS } from '../../src/theme/colors';
 import { triggerHaptic } from '../../src/utils/haptics';
-import { calculatePayloadBytes, formatShortHash, generateIntegrityHash } from '../../src/utils/hash';
+import {
+  calculatePayloadBytes,
+  formatShortHash,
+  generateIntegrityHashAsync,
+} from '../../src/utils/hash';
 
 const CATEGORIES: OperationCategory[] = [
   'INFRASTRUCTURE',
@@ -31,91 +38,162 @@ const CATEGORIES: OperationCategory[] = [
 
 const PRIORITIES: PriorityLevel[] = ['CRITICAL', 'HIGH', 'NORMAL'];
 
-const GPS_SECTORS: Coordinates[] = [
-  { latitude: 40.7128, longitude: -74.006, sector: 'SECTOR-NE-04', accuracyMeters: 1.8 },
-  { latitude: 40.7419, longitude: -73.9895, sector: 'SECTOR-CORE-02', accuracyMeters: 2.2 },
-  { latitude: 40.7589, longitude: -73.9851, sector: 'SECTOR-NORTH-08', accuracyMeters: 1.6 },
-  { latitude: 40.7033, longitude: -74.017, sector: 'SECTOR-SOUTH-01', accuracyMeters: 2.4 },
-];
-
-const QR_CHECKPOINTS = [
-  'CHK-2026-ALPHA',
-  'CHK-2026-BRAVO',
-  'CHK-2026-CHARLIE',
-  'CHK-2026-DELTA',
-  'CHK-2026-OMEGA',
-];
-
-const QUICK_TEMPLATES = [
-  {
-    label: 'Thermal Alert',
-    title: 'Transformer Bus B Thermal Spike',
-    category: 'POWER_GRID' as OperationCategory,
-    priority: 'CRITICAL' as PriorityLevel,
-    note: 'Infrared thermography detected +14°C delta across phase C insulator.',
-  },
-  {
-    label: 'Fiber Splice',
-    title: 'Backhaul Conduit Splice Audit',
-    category: 'TELEMETRY' as OperationCategory,
-    priority: 'HIGH' as PriorityLevel,
-    note: 'Optical loss stabilized at 0.3dB after mechanical enclosure resealing.',
-  },
-  {
-    label: 'Gate Patrol',
-    title: 'Perimeter Access Telemetry Check',
-    category: 'SECURITY' as OperationCategory,
-    priority: 'NORMAL' as PriorityLevel,
-    note: 'RFID badge reader and failover battery verified at 100% nominal.',
-  },
-];
-
 export default function CaptureScreen() {
   const router = useRouter();
   const layout = useAdaptiveLayout();
 
   const networkMode = usePulseStore((s) => s.networkMode);
-  const addOperation = usePulseStore((s) => s.addOperation);
+  const createOperation = usePulseStore((s) => s.createOperation);
 
-  const [title, setTitle] = useState('Substation Valve Pressure Inspection');
+  const [title, setTitle] = useState('');
   const [category, setCategory] = useState<OperationCategory>('INFRASTRUCTURE');
   const [priority, setPriority] = useState<PriorityLevel>('HIGH');
-  const [technicalNote, setTechnicalNote] = useState(
-    'Verified hydraulic pressure stability at 42.6 PSI; zero micro-leakage observed.'
-  );
-  const [gpsIndex, setGpsIndex] = useState(0);
-  const [checkpointIndex, setCheckpointIndex] = useState(0);
-  const [qrScanned, setQrScanned] = useState(true);
+  const [technicalNote, setTechnicalNote] = useState('');
+
+  // Real GPS State
+  const [gpsStatus, setGpsStatus] = useState<
+    'IDLE' | 'ACQUIRING' | 'LOCKED' | 'DENIED' | 'ERROR'
+  >('IDLE');
+  const [gpsMessage, setGpsMessage] = useState<string>('Tap Acquire GPS to capture device location');
+  const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
+  const [manualLat, setManualLat] = useState('');
+  const [manualLng, setManualLng] = useState('');
+
+  // Real Camera QR State
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannedType, setScannedType] = useState<string | null>(null);
+  const [checkpointId, setCheckpointId] = useState('');
+  const [cameraMessage, setCameraMessage] = useState<string | null>(null);
+
+  // Hash & Submission State
+  const [liveHash, setLiveHash] = useState<string>('sha256:pending...');
+  const [submitting, setSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [lastCommittedCode, setLastCommittedCode] = useState<string | null>(null);
 
-  const coordinates = GPS_SECTORS[gpsIndex];
-  const checkpointId = qrScanned ? QR_CHECKPOINTS[checkpointIndex] : undefined;
+  const resolvedCoordinates: Coordinates | null = useMemo(() => {
+    if (coordinates) return coordinates;
+    const parsedLat = Number.parseFloat(manualLat);
+    const parsedLng = Number.parseFloat(manualLng);
+    if (Number.isFinite(parsedLat) && Number.isFinite(parsedLng)) {
+      return {
+        latitude: parsedLat,
+        longitude: parsedLng,
+        accuracyMeters: null,
+        altitudeMeters: null,
+        source: 'MANUAL',
+      };
+    }
+    return null;
+  }, [coordinates, manualLat, manualLng]);
 
-  const previewMeta = useMemo(() => {
-    const raw = JSON.stringify({
-      title: title.trim(),
-      category,
-      priority,
-      coordinates,
-      technicalNote: technicalNote.trim(),
-      checkpointId: checkpointId ?? null,
+  const canonicalPreview = useMemo(
+    () =>
+      JSON.stringify({
+        title: title.trim(),
+        category,
+        priority,
+        coordinates: resolvedCoordinates,
+        technicalNote: technicalNote.trim(),
+        checkpointId: checkpointId.trim() || null,
+      }),
+    [title, category, priority, resolvedCoordinates, technicalNote, checkpointId]
+  );
+
+  const payloadBytes = useMemo(() => calculatePayloadBytes(canonicalPreview), [canonicalPreview]);
+
+  useEffect(() => {
+    let active = true;
+    void generateIntegrityHashAsync(canonicalPreview).then((digest) => {
+      if (active) setLiveHash(digest);
     });
-    return {
-      hash: generateIntegrityHash(raw),
-      bytes: calculatePayloadBytes(raw),
+    return () => {
+      active = false;
     };
-  }, [title, category, priority, coordinates, technicalNote, checkpointId]);
+  }, [canonicalPreview]);
 
-  const handleLockGps = async () => {
+  const handleAcquireGps = async () => {
     await triggerHaptic('medium');
-    setGpsIndex((prev) => (prev + 1) % GPS_SECTORS.length);
+    setGpsStatus('ACQUIRING');
+    setGpsMessage('Requesting foreground location permission...');
+
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        await triggerHaptic('warning');
+        setGpsStatus('DENIED');
+        setGpsMessage(
+          'Location permission denied. Enter coordinates manually below or enable GPS in OS settings.'
+        );
+        return;
+      }
+
+      setGpsMessage('Acquiring satellite GNSS fix...');
+      const fix = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+
+      const nextCoords: Coordinates = {
+        latitude: Number(fix.coords.latitude.toFixed(6)),
+        longitude: Number(fix.coords.longitude.toFixed(6)),
+        accuracyMeters:
+          typeof fix.coords.accuracy === 'number'
+            ? Number(fix.coords.accuracy.toFixed(1))
+            : null,
+        altitudeMeters:
+          typeof fix.coords.altitude === 'number'
+            ? Number(fix.coords.altitude.toFixed(1))
+            : null,
+        source: 'GPS_HARDWARE',
+      };
+
+      setCoordinates(nextCoords);
+      setManualLat(String(nextCoords.latitude));
+      setManualLng(String(nextCoords.longitude));
+      setGpsStatus('LOCKED');
+      setGpsMessage('Hardware GPS fix acquired');
+      await triggerHaptic('success');
+    } catch (err) {
+      await triggerHaptic('error');
+      setGpsStatus('ERROR');
+      setGpsMessage(
+        err instanceof Error
+          ? `${err.message}. Use manual coordinates fallback.`
+          : 'GPS sensor unavailable. Enter coordinates manually.'
+      );
+    }
   };
 
-  const handleScanQr = async () => {
-    await triggerHaptic('success');
-    setQrScanned(true);
-    setCheckpointIndex((prev) => (prev + 1) % QR_CHECKPOINTS.length);
+  const handleToggleScanner = async () => {
+    await triggerHaptic('light');
+    if (scannerOpen) {
+      setScannerOpen(false);
+      return;
+    }
+
+    setCameraMessage(null);
+    if (!cameraPermission?.granted) {
+      const res = await requestCameraPermission();
+      if (!res.granted) {
+        await triggerHaptic('warning');
+        setCameraMessage(
+          'Camera permission denied or unavailable. Enter checkpoint ID manually below.'
+        );
+        return;
+      }
+    }
+
+    setScannerOpen(true);
+  };
+
+  const handleBarcodeScanned = (result: BarcodeScanningResult) => {
+    if (!scannerOpen) return;
+    setScannerOpen(false);
+    setCheckpointId(result.data);
+    setScannedType(result.type.toUpperCase());
+    setCameraMessage(`Captured ${result.type.toUpperCase()} checkpoint`);
+    void triggerHaptic('success');
   };
 
   const handleSelectPriority = async (level: PriorityLevel) => {
@@ -123,16 +201,8 @@ export default function CaptureScreen() {
     setPriority(level);
   };
 
-  const handleApplyTemplate = async (tpl: (typeof QUICK_TEMPLATES)[number]) => {
-    await triggerHaptic('light');
-    setTitle(tpl.title);
-    setCategory(tpl.category);
-    setPriority(tpl.priority);
-    setTechnicalNote(tpl.note);
-    setValidationError(null);
-  };
-
   const handleCommit = async () => {
+    if (submitting) return;
     if (title.trim().length < 3) {
       await triggerHaptic('error');
       setValidationError('Enter an operation title (minimum 3 characters).');
@@ -140,23 +210,37 @@ export default function CaptureScreen() {
     }
     if (technicalNote.trim().length < 5) {
       await triggerHaptic('error');
-      setValidationError('Enter technical field observations before committing.');
+      setValidationError('Enter technical field observations (minimum 5 characters).');
+      return;
+    }
+    if (!resolvedCoordinates) {
+      await triggerHaptic('error');
+      setValidationError('Acquire hardware GPS coordinates or enter valid latitude/longitude.');
       return;
     }
 
     setValidationError(null);
-    await triggerHaptic('success');
+    setSubmitting(true);
 
-    const created = addOperation({
-      title,
-      category,
-      priority,
-      coordinates,
-      technicalNote,
-      checkpointId,
-    });
+    try {
+      const created = await createOperation({
+        title,
+        category,
+        priority,
+        coordinates: resolvedCoordinates,
+        technicalNote,
+        checkpointId: checkpointId.trim() || undefined,
+      });
 
-    setLastCommittedCode(created.code);
+      await triggerHaptic('success');
+      setLastCommittedCode(created.code);
+      setTitle('');
+      setTechnicalNote('');
+      setCheckpointId('');
+      setScannedType(null);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const isTwoCol = layout.columns >= 2;
@@ -166,48 +250,32 @@ export default function CaptureScreen() {
       style={styles.root}
       contentContainerStyle={{
         paddingTop: layout.spacing.md,
-        paddingBottom: layout.spacing.xl + 20,
+        paddingBottom: layout.scrollBottomPadding,
         paddingLeft: layout.safePadding.left,
         paddingRight: layout.safePadding.right,
       }}
     >
       <View style={[styles.container, { maxWidth: layout.maxContentWidth }]}>
         <View style={styles.headerRow}>
-          <View>
-            <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]} numberOfLines={1}>
               Field Operation Capture
             </Text>
-            <Text style={styles.screenSubtitle}>
-              One-handed capture • Mode: {networkMode === 'OFFLINE' ? 'LOCAL BUFFERING' : 'CLOUD UPLINK'}
+            <Text style={styles.screenSubtitle} numberOfLines={2}>
+              Hardware GPS + Camera QR + SHA-256 • Mode:{' '}
+              {networkMode === 'OFFLINE' ? 'LOCAL OFFLINE QUEUE' : 'ONLINE AUTO-SYNC'}
             </Text>
           </View>
         </View>
 
-        {/* Quick 1-Tap Field Templates */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.templateRow}>
-          {QUICK_TEMPLATES.map((tpl) => (
-            <Pressable
-              key={tpl.label}
-              onPress={() => handleApplyTemplate(tpl)}
-              style={({ pressed }) => [
-                styles.templateChip,
-                { minHeight: layout.minTouchTarget, opacity: pressed ? 0.78 : 1 },
-              ]}
-            >
-              <Sparkles size={14} color={COLORS.textSecondary} />
-              <Text style={styles.templateChipText}>{tpl.label}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-
         <View style={[styles.columnsWrap, isTwoCol && styles.columnsSplit, { gap: layout.gutter }]}>
-          {/* Left Column: Ergonomic Form Inputs */}
+          {/* Left Column: Operation Details */}
           <View style={[styles.card, isTwoCol && styles.colFlex, { padding: layout.cardPadding }]}>
             <Text style={styles.fieldLabel}>OPERATION TITLE</Text>
             <TextInput
               value={title}
               onChangeText={setTitle}
-              placeholder="e.g. Substation T-14 Thermal Inspection"
+              placeholder="Enter field inspection title..."
               placeholderTextColor={COLORS.textMuted}
               style={[styles.input, { minHeight: layout.minTouchTarget }]}
             />
@@ -244,7 +312,7 @@ export default function CaptureScreen() {
                     style={({ pressed }) => [
                       styles.priorityButton,
                       {
-                        minHeight: 52,
+                        minHeight: 50,
                         borderColor: active ? activeBorder : COLORS.border,
                         backgroundColor: active ? activeBg : COLORS.surfaceElevated,
                         opacity: pressed ? 0.8 : 1,
@@ -262,6 +330,7 @@ export default function CaptureScreen() {
                         styles.priorityText,
                         { color: active ? activeColor : COLORS.textSecondary },
                       ]}
+                      numberOfLines={1}
                     >
                       {level}
                     </Text>
@@ -296,6 +365,7 @@ export default function CaptureScreen() {
                         styles.categoryText,
                         { color: active ? COLORS.primaryText : COLORS.textSecondary },
                       ]}
+                      numberOfLines={1}
                     >
                       {cat}
                     </Text>
@@ -304,113 +374,198 @@ export default function CaptureScreen() {
               })}
             </View>
 
-            <Text style={styles.fieldLabel}>TECHNICAL FIELD NOTE</Text>
+            <Text style={styles.fieldLabel}>TECHNICAL FIELD OBSERVATIONS</Text>
             <TextInput
               value={technicalNote}
               onChangeText={setTechnicalNote}
               multiline
               numberOfLines={4}
-              placeholder="Document sensor readings, physical state, and corrective actions..."
+              placeholder="Record measurements, diagnostics, and corrective actions..."
               placeholderTextColor={COLORS.textMuted}
               textAlignVertical="top"
               style={[styles.input, styles.textArea]}
             />
           </View>
 
-          {/* Right Column: Telemetry, GPS, QR Checkpoint & Commit */}
+          {/* Right Column: Real GPS, Real QR Camera & SHA-256 Commit */}
           <View style={[styles.rightStack, isTwoCol && styles.colFlex, { gap: layout.gutter }]}>
+            {/* Real Hardware GPS Card */}
             <View style={[styles.card, { padding: layout.cardPadding }]}>
               <View style={styles.cardHeader}>
-                <Crosshair size={16} color={COLORS.online} />
-                <Text style={styles.cardTitle}>GPS TELEMETRY LOCK</Text>
+                <Crosshair
+                  size={16}
+                  color={gpsStatus === 'LOCKED' ? COLORS.online : COLORS.textPrimary}
+                />
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  REAL GPS TELEMETRY (EXPO-LOCATION)
+                </Text>
               </View>
 
               <View style={styles.telemetryBox}>
-                <Text style={styles.telemetryLine}>
-                  LAT / LNG:{' '}
-                  <Text style={styles.telemetryVal}>
-                    {coordinates.latitude.toFixed(4)}, {coordinates.longitude.toFixed(4)}
-                  </Text>
-                </Text>
-                <Text style={styles.telemetryLine}>
-                  SECTOR: <Text style={styles.telemetryVal}>{coordinates.sector}</Text>
-                </Text>
-                <Text style={styles.telemetryLine}>
-                  PRECISION:{' '}
-                  <Text style={[styles.telemetryVal, { color: COLORS.online }]}>
-                    ±{coordinates.accuracyMeters}m GNSS
-                  </Text>
-                </Text>
+                <Text style={styles.telemetryStatus}>{gpsMessage}</Text>
+                {resolvedCoordinates ? (
+                  <>
+                    <Text style={styles.telemetryLine}>
+                      COORDS:{' '}
+                      <Text style={styles.telemetryVal}>
+                        {resolvedCoordinates.latitude.toFixed(6)},{' '}
+                        {resolvedCoordinates.longitude.toFixed(6)}
+                      </Text>
+                    </Text>
+                    <Text style={styles.telemetryLine}>
+                      ACCURACY:{' '}
+                      <Text style={[styles.telemetryVal, { color: COLORS.online }]}>
+                        {resolvedCoordinates.accuracyMeters !== null
+                          ? `±${resolvedCoordinates.accuracyMeters}m`
+                          : 'MANUAL INPUT'}
+                      </Text>
+                      {resolvedCoordinates.altitudeMeters !== null
+                        ? ` • ALT: ${resolvedCoordinates.altitudeMeters}m`
+                        : ''}
+                    </Text>
+                  </>
+                ) : null}
               </View>
 
               <Pressable
-                onPress={handleLockGps}
+                onPress={handleAcquireGps}
+                disabled={gpsStatus === 'ACQUIRING'}
                 accessibilityRole="button"
-                accessibilityLabel="Lock Satellite GPS"
+                accessibilityLabel="Acquire Real GPS Coordinates"
                 style={({ pressed }) => [
                   styles.secondaryButton,
-                  { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
+                  {
+                    minHeight: layout.minTouchTarget,
+                    opacity: pressed || gpsStatus === 'ACQUIRING' ? 0.78 : 1,
+                  },
                 ]}
               >
                 <Radio size={16} color={COLORS.textPrimary} />
-                <Text style={styles.secondaryButtonText}>LOCK SATELLITE GPS</Text>
+                <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                  {gpsStatus === 'ACQUIRING' ? 'ACQUIRING GNSS FIX...' : 'ACQUIRE REAL GPS FIX'}
+                </Text>
               </Pressable>
+
+              <View style={styles.manualCoordRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.miniLabel}>LATITUDE</Text>
+                  <TextInput
+                    value={manualLat}
+                    onChangeText={(val) => {
+                      setCoordinates(null);
+                      setManualLat(val);
+                    }}
+                    keyboardType="numeric"
+                    placeholder="e.g. 40.7128"
+                    placeholderTextColor={COLORS.textMuted}
+                    style={[styles.input, { minHeight: layout.minTouchTarget }]}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.miniLabel}>LONGITUDE</Text>
+                  <TextInput
+                    value={manualLng}
+                    onChangeText={(val) => {
+                      setCoordinates(null);
+                      setManualLng(val);
+                    }}
+                    keyboardType="numeric"
+                    placeholder="e.g. -74.0060"
+                    placeholderTextColor={COLORS.textMuted}
+                    style={[styles.input, { minHeight: layout.minTouchTarget }]}
+                  />
+                </View>
+              </View>
             </View>
 
+            {/* Real Camera QR / Barcode Card */}
             <View style={[styles.card, { padding: layout.cardPadding }]}>
               <View style={styles.cardHeader}>
                 <QrCode size={16} color={COLORS.textPrimary} />
-                <Text style={styles.cardTitle}>CHECKPOINT QR SCANNER</Text>
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  QR / BARCODE SCANNER (EXPO-CAMERA)
+                </Text>
               </View>
 
-              <View style={styles.qrFrame}>
-                <Text style={styles.qrCodeText}>
-                  {checkpointId ?? 'NO CHECKPOINT ATTACHED'}
-                </Text>
-                <Text style={styles.qrHint}>
-                  Simulated haptic checkpoint verification for underground / offline zones
-                </Text>
-              </View>
+              {scannerOpen ? (
+                <View style={styles.cameraContainer}>
+                  <CameraView
+                    style={styles.cameraView}
+                    facing="back"
+                    barcodeScannerSettings={{
+                      barcodeTypes: ['qr', 'code128', 'ean13'],
+                    }}
+                    onBarcodeScanned={handleBarcodeScanned}
+                  />
+                  <View style={styles.cameraOverlay}>
+                    <Text style={styles.cameraHint}>Align QR / Code128 / EAN13 inside frame</Text>
+                  </View>
+                </View>
+              ) : null}
 
               <Pressable
-                onPress={handleScanQr}
+                onPress={handleToggleScanner}
                 accessibilityRole="button"
-                accessibilityLabel="Scan Checkpoint QR"
+                accessibilityLabel={scannerOpen ? 'Close Camera Scanner' : 'Open QR Camera Scanner'}
                 style={({ pressed }) => [
                   styles.secondaryButton,
                   { minHeight: layout.minTouchTarget, opacity: pressed ? 0.8 : 1 },
                 ]}
               >
-                <QrCode size={16} color={COLORS.textPrimary} />
-                <Text style={styles.secondaryButtonText}>SCAN CHECKPOINT QR (HAPTIC)</Text>
+                {scannerOpen ? (
+                  <X size={16} color={COLORS.critical} />
+                ) : (
+                  <Camera size={16} color={COLORS.textPrimary} />
+                )}
+                <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                  {scannerOpen ? 'CLOSE CAMERA VIEWFINDER' : 'SCAN CHECKPOINT WITH CAMERA'}
+                </Text>
               </Pressable>
+
+              {cameraMessage ? <Text style={styles.cameraNote}>{cameraMessage}</Text> : null}
+
+              <Text style={styles.miniLabel}>
+                CHECKPOINT ID {scannedType ? `(${scannedType})` : '(SCANNED OR MANUAL)'}
+              </Text>
+              <TextInput
+                value={checkpointId}
+                onChangeText={setCheckpointId}
+                placeholder="Scan QR/barcode or enter checkpoint code..."
+                placeholderTextColor={COLORS.textMuted}
+                style={[styles.input, { minHeight: layout.minTouchTarget }]}
+              />
             </View>
 
+            {/* Real SHA-256 Digest & Commit */}
             <View style={[styles.card, { padding: layout.cardPadding }]}>
               <View style={styles.cardHeader}>
                 <ShieldCheck size={16} color={COLORS.online} />
-                <Text style={styles.cardTitle}>SHA-256 INTEGRITY ENVELOPE</Text>
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  REAL SHA-256 SEAL (EXPO-CRYPTO)
+                </Text>
               </View>
 
-              <Text style={styles.hashPreview}>{formatShortHash(previewMeta.hash)}</Text>
-              <Text style={styles.payloadText}>
-                PAYLOAD: {previewMeta.bytes} BYTES • TARGET:{' '}
-                {networkMode === 'OFFLINE' ? 'QUEUED_LOCAL' : 'AUTO_SYNC_CLOUD'}
+              <Text style={styles.hashPreview} numberOfLines={1}>
+                {formatShortHash(liveHash)}
+              </Text>
+              <Text style={styles.payloadText} numberOfLines={1}>
+                PAYLOAD: {payloadBytes} BYTES • TARGET:{' '}
+                {networkMode === 'OFFLINE' ? 'QUEUED_LOCAL' : 'AUTO_SYNC'}
               </Text>
 
-              {validationError ? (
-                <Text style={styles.errorText}>{validationError}</Text>
-              ) : null}
+              {validationError ? <Text style={styles.errorText}>{validationError}</Text> : null}
 
               {lastCommittedCode ? (
                 <View style={styles.successBanner}>
                   <CheckCircle2 size={16} color={COLORS.online} />
                   <View style={{ flex: 1, gap: 4 }}>
                     <Text style={styles.successTitle}>
-                      {lastCommittedCode} COMMITTED (
-                      {networkMode === 'OFFLINE' ? 'QUEUED_LOCAL' : 'SYNCED'})
+                      {lastCommittedCode} SEALED & PERSISTED
                     </Text>
-                    <Pressable onPress={() => router.push('/(tabs)/queue')}>
+                    <Pressable
+                      onPress={() => router.push('/(tabs)/queue')}
+                      style={{ minHeight: 32, justifyContent: 'center' }}
+                    >
                       <Text style={styles.successLink}>Inspect packet in Sync Queue →</Text>
                     </Pressable>
                   </View>
@@ -419,18 +574,21 @@ export default function CaptureScreen() {
 
               <Pressable
                 onPress={handleCommit}
+                disabled={submitting}
                 accessibilityRole="button"
                 accessibilityLabel="Commit Field Report"
                 style={({ pressed }) => [
                   styles.primaryButton,
-                  { minHeight: 52, opacity: pressed ? 0.85 : 1 },
+                  { minHeight: 52, opacity: pressed || submitting ? 0.8 : 1 },
                 ]}
               >
                 <Send size={16} color={COLORS.primaryText} />
-                <Text style={styles.primaryButtonText}>
-                  {networkMode === 'OFFLINE'
+                <Text style={styles.primaryButtonText} numberOfLines={1}>
+                  {submitting
+                    ? 'SEALING & PERSISTING...'
+                    : networkMode === 'OFFLINE'
                     ? 'SAVE TO OFFLINE QUEUE'
-                    : 'COMMIT & SYNC FIELD REPORT'}
+                    : 'COMMIT & SYNC REPORT'}
                 </Text>
               </Pressable>
             </View>
@@ -465,25 +623,7 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 12,
     marginTop: 2,
-  },
-  templateRow: {
-    gap: 8,
-    paddingVertical: 2,
-  },
-  templateChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: COLORS.card,
-    borderWidth: 1,
-    borderColor: COLORS.borderStrong,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-  },
-  templateChipText: {
-    color: COLORS.textPrimary,
-    fontSize: 12,
-    fontWeight: '700',
+    flexShrink: 1,
   },
   columnsWrap: {
     flexDirection: 'column',
@@ -503,7 +643,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 12,
-    gap: 12,
+    gap: 10,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -514,13 +654,22 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 0.7,
+    letterSpacing: 0.6,
+    flexShrink: 1,
   },
   fieldLabel: {
     color: COLORS.textMuted,
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.7,
+    marginTop: 2,
+  },
+  miniLabel: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    marginBottom: 4,
   },
   input: {
     backgroundColor: COLORS.surfaceElevated,
@@ -533,7 +682,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   textArea: {
-    minHeight: 96,
+    minHeight: 100,
   },
   priorityRow: {
     flexDirection: 'row',
@@ -547,17 +696,19 @@ const styles = StyleSheet.create({
     gap: 6,
     borderRadius: 8,
     borderWidth: 1,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
   },
   priorityDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
+    flexShrink: 0,
   },
   priorityText: {
     fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 0.5,
+    letterSpacing: 0.4,
+    flexShrink: 1,
   },
   categoryWrap: {
     flexDirection: 'row',
@@ -582,7 +733,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     padding: 12,
-    gap: 4,
+    gap: 5,
+  },
+  telemetryStatus: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
   },
   telemetryLine: {
     color: COLORS.textMuted,
@@ -593,27 +749,40 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontFamily: 'monospace',
   },
-  qrFrame: {
-    backgroundColor: COLORS.surfaceElevated,
-    borderRadius: 8,
+  manualCoordRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  cameraContainer: {
+    height: 220,
+    borderRadius: 10,
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: COLORS.borderStrong,
-    borderStyle: 'dashed',
-    padding: 14,
+    backgroundColor: COLORS.background,
+  },
+  cameraView: {
+    flex: 1,
+  },
+  cameraOverlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(9,9,11,0.75)',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     alignItems: 'center',
-    gap: 4,
   },
-  qrCodeText: {
+  cameraHint: {
     color: COLORS.textPrimary,
-    fontSize: 15,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-  },
-  qrHint: {
-    color: COLORS.textMuted,
     fontSize: 11,
-    textAlign: 'center',
+    fontWeight: '700',
+  },
+  cameraNote: {
+    color: COLORS.offline,
+    fontSize: 12,
+    lineHeight: 17,
   },
   hashPreview: {
     color: COLORS.online,
@@ -645,6 +814,7 @@ const styles = StyleSheet.create({
     color: COLORS.online,
     fontSize: 12,
     fontWeight: '800',
+    flexShrink: 1,
   },
   successLink: {
     color: COLORS.textPrimary,
@@ -666,6 +836,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '900',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   secondaryButton: {
     flexDirection: 'row',
@@ -683,5 +854,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
 });

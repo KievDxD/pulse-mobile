@@ -6,18 +6,17 @@ import {
   Lock,
   ShieldAlert,
   ShieldCheck,
-  Zap,
 } from 'lucide-react-native';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   authenticateWithBiometrics,
   authenticateWithPin,
   BiometricHardwareInfo,
   clearAuthSession,
-  DEFAULT_PIN,
+  configureUserPin,
+  hasConfiguredPin,
   inspectBiometricHardware,
-  instantDemoUnlock,
 } from '../src/services/biometricAuth';
 import { usePulseStore } from '../src/store/usePulseStore';
 import { MIN_TOUCH_TARGET_DP, useAdaptiveLayout } from '../src/theme/adaptive';
@@ -41,28 +40,26 @@ export default function LockScreen() {
   const lockSession = usePulseStore((s) => s.lockSession);
 
   const [pin, setPin] = useState('');
+  const [setupStage, setSetupStage] = useState<'LOADING' | 'CREATE' | 'CONFIRM' | 'VERIFY'>(
+    'LOADING'
+  );
+  const [pendingPin, setPendingPin] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isError, setIsError] = useState(false);
   const [hardware, setHardware] = useState<BiometricHardwareInfo | null>(null);
   const [busy, setBusy] = useState(false);
+  const autoPromptTriggered = useRef(false);
 
-  useEffect(() => {
-    let active = true;
-    inspectBiometricHardware().then((info) => {
-      if (active) setHardware(info);
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const completeUnlock = useCallback(
+    async (method: 'BIOMETRIC' | 'PIN') => {
+      await triggerHaptic('success');
+      unlockSession(method);
+      router.replace('/(tabs)');
+    },
+    [router, unlockSession]
+  );
 
-  const completeUnlock = async (method: 'BIOMETRIC' | 'PIN' | 'DEMO_BYPASS') => {
-    await triggerHaptic('success');
-    unlockSession(method);
-    router.replace('/(tabs)');
-  };
-
-  const handleBiometricAuth = async () => {
+  const handleBiometricAuth = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     setStatusMessage(null);
@@ -80,25 +77,77 @@ export default function LockScreen() {
     await triggerHaptic('warning');
     setIsError(true);
     setStatusMessage(
-      result.error ?? 'Biometric unavailable. Enter PIN 2026 or tap Instant Demo Unlock.'
+      result.error ?? 'Biometric verification unavailable. Authenticate using your security PIN.'
     );
-  };
+  }, [busy, completeUnlock]);
 
-  const handleInstantDemoUnlock = async () => {
-    if (busy) return;
-    setBusy(true);
-    await triggerHaptic('medium');
-    const result = await instantDemoUnlock();
-    setBusy(false);
-    if (result.success) {
-      await completeUnlock('DEMO_BYPASS');
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const [info, pinExists] = await Promise.all([
+        inspectBiometricHardware(),
+        hasConfiguredPin(),
+      ]);
+      if (!active) return;
+
+      setHardware(info);
+      setSetupStage(pinExists ? 'VERIFY' : 'CREATE');
+
+      if (!isUnlocked && info.hasHardware && info.isEnrolled && !autoPromptTriggered.current) {
+        autoPromptTriggered.current = true;
+        const result = await authenticateWithBiometrics();
+        if (active && result.success) {
+          await completeUnlock('BIOMETRIC');
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [completeUnlock, isUnlocked]);
+
+  const handlePinComplete = async (enteredPin: string) => {
+    if (busy || setupStage === 'LOADING') return;
+
+    if (setupStage === 'CREATE') {
+      setPendingPin(enteredPin);
+      setPin('');
+      setSetupStage('CONFIRM');
+      setIsError(false);
+      setStatusMessage('Re-enter the 4-digit PIN to encrypt and store it in SecureStore.');
+      return;
     }
-  };
 
-  const submitPin = async (candidatePin: string) => {
-    if (busy) return;
+    if (setupStage === 'CONFIRM') {
+      if (enteredPin !== pendingPin) {
+        await triggerHaptic('error');
+        setPin('');
+        setPendingPin('');
+        setSetupStage('CREATE');
+        setIsError(true);
+        setStatusMessage('PIN confirmation mismatch. Choose a new 4-digit security PIN.');
+        return;
+      }
+
+      setBusy(true);
+      const res = await configureUserPin(enteredPin);
+      setBusy(false);
+
+      if (res.success) {
+        setSetupStage('VERIFY');
+        await completeUnlock('PIN');
+      } else {
+        await triggerHaptic('error');
+        setPin('');
+        setIsError(true);
+        setStatusMessage(res.error ?? 'Failed to store PIN in SecureStore.');
+      }
+      return;
+    }
+
     setBusy(true);
-    const result = await authenticateWithPin(candidatePin);
+    const result = await authenticateWithPin(enteredPin);
     setBusy(false);
 
     if (result.success) {
@@ -108,17 +157,22 @@ export default function LockScreen() {
 
     await triggerHaptic('error');
     setIsError(true);
-    setStatusMessage(result.error ?? `Invalid PIN. Use ${DEFAULT_PIN} for demo access.`);
+    setStatusMessage(result.error ?? 'Invalid security PIN.');
     setPin('');
   };
 
   const handleKeyPress = async (key: string) => {
+    if (setupStage === 'LOADING') return;
     await triggerHaptic('light');
     setIsError(false);
-    setStatusMessage(null);
 
     if (key === 'CLR') {
       setPin('');
+      if (setupStage === 'CONFIRM') {
+        setPendingPin('');
+        setSetupStage('CREATE');
+      }
+      setStatusMessage(null);
       return;
     }
 
@@ -132,7 +186,7 @@ export default function LockScreen() {
     setPin(nextPin);
 
     if (nextPin.length === 4) {
-      await submitPin(nextPin);
+      await handlePinComplete(nextPin);
     }
   };
 
@@ -142,10 +196,19 @@ export default function LockScreen() {
     lockSession();
     setPin('');
     setIsError(false);
-    setStatusMessage('Terminal session sealed. Authenticate to resume field operations.');
+    setStatusMessage('Terminal sealed. Biometric or PIN verification required to resume.');
   };
 
   const isSplitLayout = layout.columns >= 2;
+
+  const pinInstruction =
+    setupStage === 'CREATE'
+      ? 'First-time setup: Create your personal 4-digit security PIN'
+      : setupStage === 'CONFIRM'
+      ? 'Confirm your 4-digit security PIN to encrypt in SecureStore'
+      : setupStage === 'VERIFY'
+      ? 'Enter your encrypted 4-digit operator PIN'
+      : 'Inspecting SecureStore enclave...';
 
   return (
     <ScrollView
@@ -154,13 +217,13 @@ export default function LockScreen() {
         styles.scrollContent,
         {
           paddingTop: layout.safePadding.top + 12,
-          paddingBottom: layout.safePadding.bottom + 24,
+          paddingBottom: layout.scrollBottomPadding,
           paddingLeft: layout.safePadding.left,
           paddingRight: layout.safePadding.right,
         },
       ]}
     >
-      <View style={[styles.container, { maxWidth: isSplitLayout ? 920 : 480 }]}>
+      <View style={[styles.container, { maxWidth: isSplitLayout ? layout.maxContentWidth : 480 }]}>
         <View style={styles.headerBlock}>
           <View style={styles.brandBadge}>
             {isUnlocked ? (
@@ -168,16 +231,16 @@ export default function LockScreen() {
             ) : (
               <Lock size={16} color={COLORS.offline} />
             )}
-            <Text style={styles.brandBadgeText}>
-              PULSE // MOBILE • {isUnlocked ? `VERIFIED (${authMethod})` : 'SECURITY GATE'}
+            <Text style={styles.brandBadgeText} numberOfLines={1}>
+              PULSE // MOBILE • {isUnlocked ? `VERIFIED (${authMethod})` : 'SECURITY GATE V2.0'}
             </Text>
           </View>
           <Text style={[styles.title, { fontSize: layout.typography.hero }]}>
-            Field Terminal Clearance
+            Field Terminal Security
           </Text>
           <Text style={[styles.subtitle, { fontSize: layout.typography.body }]}>
-            Hardware-backed biometric verification via expo-local-authentication & encrypted
-            SecureStore enclave.
+            Hardware biometric verification via expo-local-authentication with SHA-256 PIN stored
+            in SecureStore.
           </Text>
         </View>
 
@@ -185,25 +248,33 @@ export default function LockScreen() {
           <View style={[styles.card, isSplitLayout && styles.splitColumn]}>
             <View style={styles.cardHeader}>
               <Fingerprint size={18} color={COLORS.textPrimary} />
-              <Text style={styles.cardTitle}>BIOMETRIC & DEMO ACCESS</Text>
+              <Text style={styles.cardTitle} numberOfLines={1}>
+                HARDWARE BIOMETRICS
+              </Text>
             </View>
 
             <View style={styles.hardwareBox}>
               <Text style={styles.hwRow}>
                 SENSOR:{' '}
                 <Text style={styles.hwVal}>
-                  {hardware?.hasHardware
-                    ? hardware.isEnrolled
-                      ? 'ENROLLED & READY'
-                      : 'HARDWARE PRESENT (UNENROLLED)'
-                    : 'EMULATOR / WEB FALLBACK'}
+                  {hardware
+                    ? hardware.hasHardware
+                      ? hardware.isEnrolled
+                        ? 'ENROLLED & ACTIVE'
+                        : 'HARDWARE PRESENT (NOT ENROLLED)'
+                      : 'NOT PRESENT ON HOST'
+                    : 'INSPECTING HARDWARE...'}
                 </Text>
               </Text>
               <Text style={styles.hwRow}>
-                METHODS:{' '}
+                CAPABILITIES:{' '}
                 <Text style={styles.hwVal}>
-                  {hardware?.supportedTypes.join(', ') ?? 'Inspecting sensors...'}
+                  {hardware?.supportedTypes.join(', ') ?? 'Checking...'}
                 </Text>
+              </Text>
+              <Text style={styles.hwRow}>
+                SECURITY LEVEL:{' '}
+                <Text style={styles.hwVal}>{hardware?.securityLevel ?? 'Checking...'}</Text>
               </Text>
               <Text style={styles.hwRow}>
                 ENCLAVE:{' '}
@@ -214,29 +285,19 @@ export default function LockScreen() {
             </View>
 
             <Pressable
-              onPress={handleInstantDemoUnlock}
-              accessibilityRole="button"
-              accessibilityLabel="Instant Demo Unlock"
-              style={({ pressed }) => [
-                styles.primaryButton,
-                { minHeight: 52, opacity: pressed ? 0.85 : 1 },
-              ]}
-            >
-              <Zap size={18} color={COLORS.primaryText} />
-              <Text style={styles.primaryButtonText}>INSTANT DEMO UNLOCK (1-CLICK)</Text>
-            </Pressable>
-
-            <Pressable
               onPress={handleBiometricAuth}
+              disabled={busy}
               accessibilityRole="button"
               accessibilityLabel="Authenticate with Biometrics"
               style={({ pressed }) => [
-                styles.secondaryButton,
-                { minHeight: 50, opacity: pressed ? 0.8 : 1 },
+                styles.primaryButton,
+                { minHeight: 52, opacity: pressed || busy ? 0.82 : 1 },
               ]}
             >
-              <Fingerprint size={18} color={COLORS.textPrimary} />
-              <Text style={styles.secondaryButtonText}>AUTHENTICATE WITH BIOMETRICS</Text>
+              <Fingerprint size={18} color={COLORS.primaryText} />
+              <Text style={styles.primaryButtonText} numberOfLines={1}>
+                {busy ? 'VERIFYING BIOMETRICS...' : 'AUTHENTICATE WITH BIOMETRICS'}
+              </Text>
             </Pressable>
 
             {isUnlocked ? (
@@ -248,7 +309,9 @@ export default function LockScreen() {
                     { minHeight: MIN_TOUCH_TARGET_DP, opacity: pressed ? 0.8 : 1 },
                   ]}
                 >
-                  <Text style={styles.returnButtonText}>RETURN TO COMMAND</Text>
+                  <Text style={styles.returnButtonText} numberOfLines={1}>
+                    RETURN TO COMMAND
+                  </Text>
                 </Pressable>
                 <Pressable
                   onPress={handleLockTerminal}
@@ -258,7 +321,9 @@ export default function LockScreen() {
                   ]}
                 >
                   <Lock size={15} color={COLORS.critical} />
-                  <Text style={styles.lockNowText}>SEAL TERMINAL</Text>
+                  <Text style={styles.lockNowText} numberOfLines={1}>
+                    SEAL TERMINAL
+                  </Text>
                 </Pressable>
               </View>
             ) : null}
@@ -289,12 +354,14 @@ export default function LockScreen() {
           <View style={[styles.card, isSplitLayout && styles.splitColumn]}>
             <View style={styles.cardHeader}>
               <KeyRound size={18} color={COLORS.textPrimary} />
-              <Text style={styles.cardTitle}>FALLBACK SECURITY PIN</Text>
+              <Text style={styles.cardTitle} numberOfLines={1}>
+                {setupStage === 'CREATE' || setupStage === 'CONFIRM'
+                  ? 'ENCRYPTED PIN ENROLLMENT'
+                  : 'SECURESTORE PIN CLEARANCE'}
+              </Text>
             </View>
 
-            <Text style={styles.pinHint}>
-              Enter 4-digit operator PIN (<Text style={styles.pinHighlight}>{DEFAULT_PIN}</Text>)
-            </Text>
+            <Text style={styles.pinHint}>{pinInstruction}</Text>
 
             <View style={styles.pinDotsRow}>
               {[0, 1, 2, 3].map((idx) => {
@@ -388,12 +455,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 6,
+    maxWidth: '100%',
   },
   brandBadgeText: {
     color: COLORS.textSecondary,
     fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 0.8,
+    letterSpacing: 0.7,
+    flexShrink: 1,
   },
   title: {
     color: COLORS.textPrimary,
@@ -431,7 +500,8 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     fontSize: 12,
     fontWeight: '800',
-    letterSpacing: 0.8,
+    letterSpacing: 0.7,
+    flexShrink: 1,
   },
   hardwareBox: {
     backgroundColor: COLORS.surfaceElevated,
@@ -458,37 +528,23 @@ const styles = StyleSheet.create({
     gap: 8,
     backgroundColor: COLORS.primary,
     borderRadius: 10,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
   },
   primaryButtonText: {
     color: COLORS.primaryText,
-    fontSize: 13,
-    fontWeight: '900',
-    letterSpacing: 0.6,
-  },
-  secondaryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: COLORS.surfaceElevated,
-    borderWidth: 1,
-    borderColor: COLORS.borderStrong,
-    borderRadius: 10,
-    paddingHorizontal: 16,
-  },
-  secondaryButtonText: {
-    color: COLORS.textPrimary,
     fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 0.6,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    flexShrink: 1,
   },
   sessionActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
   },
   returnButton: {
     flex: 1,
+    minWidth: 130,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.onlineBg,
@@ -502,6 +558,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   lockNowButton: {
     flexDirection: 'row',
@@ -519,6 +576,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.5,
+    flexShrink: 1,
   },
   alertBox: {
     flexDirection: 'row',
@@ -532,16 +590,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     flex: 1,
+    flexShrink: 1,
     lineHeight: 17,
   },
   pinHint: {
     color: COLORS.textSecondary,
     fontSize: 13,
-  },
-  pinHighlight: {
-    color: COLORS.textPrimary,
-    fontWeight: '800',
-    fontFamily: 'monospace',
+    lineHeight: 18,
   },
   pinDotsRow: {
     flexDirection: 'row',
