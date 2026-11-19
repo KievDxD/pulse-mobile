@@ -2,7 +2,7 @@
 
 Cross-platform **Offline-First Field Operations Mobile Application** engineered with **React Native**, **Expo SDK 58**, **Expo Router**, **Strict TypeScript**, **Zustand + AsyncStorage**, a **Tamper-Evident SHA-256 Hash Chain Ledger**, **EXIF/GPS-sealed Photographic Evidence**, and live **Physical Sensor Telemetry**.
 
-Designed with an **Industrial Mobile** visual system (`#09090B` canvas, `#111114` cards, `48x48dp` Apple HIG / Material Design 3 touch targets, full Safe Area cutout handling, and virtualized `FlatList` rendering).
+Designed with an **Industrial Mobile** visual system (`#09090B` canvas, `#111114` cards, `48x48dp` Apple HIG / Material Design 3 touch targets, atomic Safe Area frame + cutout handling across portrait and phone landscape, and virtualized `FlatList` rendering).
 
 ---
 
@@ -11,11 +11,12 @@ Designed with an **Industrial Mobile** visual system (`#09090B` canvas, `#111114
 ```text
 pulse-mobile/
 ├── app/
-│   ├── _layout.tsx                     # SafeAreaProvider, StatusBar & Expo Router Stack
+│   ├── _layout.tsx                     # Root Slot layout, StatusBar & web 100dvh viewport sync
+│   ├── +html.tsx                       # Web HTML shell with viewport-fit=cover & 100dvh reset
 │   ├── lock.tsx                        # Auto-Biometric Prompt + Encrypted SecureStore User PIN Setup
 │   └── (tabs)/
-│       ├── _layout.tsx                 # Persistent OperationalHeader + Safe-Area dynamic 4-tab bar
-│       ├── index.tsx                   # Command: KPIs, hash-chain indicator & tap-to-inspect feed
+│       ├── _layout.tsx                 # OperationalHeader + detachInactiveScreens={false} dynamic TabBar
+│       ├── index.tsx                   # Command: KPIs, hash-chain indicator & flexbox tap-to-inspect feed
 │       ├── capture.tsx                 # Capture: GPS + QR Camera + Photo Evidence + SHA-256 Chain Seal
 │       ├── queue.tsx                   # Sync Queue: Virtualized FlatList, Chain Banner & JSON/CSV export
 │       └── device.tsx                  # Device Lab: Battery + Accelerometer telemetry, Operator Profile & HTTP URL
@@ -23,7 +24,7 @@ pulse-mobile/
 │   ├── components/
 │   │   ├── OperationalHeader.tsx       # Live OS network listener + operator callsign + security badge
 │   │   ├── OperationCard.tsx           # Overflow-safe card with photo thumbnail, chain #index & prevHash
-│   │   └── OperationInspectorModal.tsx # Cryptographic detail drawer (Photo, GPS Maps link, hashes & syncLog)
+│   │   └── OperationInspectorModal.tsx # Landscape-aware Cryptographic Inspector (Photo, GPS Maps, hashes & syncLog)
 │   ├── services/
 │   │   ├── ledgerIntegrity.ts          # Tamper-evident prevHash linking & verifyLedgerIntegrity() auditor
 │   │   ├── photoEvidence.ts            # expo-image-picker camera & library capture with EXIF + GPS binding
@@ -36,19 +37,21 @@ pulse-mobile/
 │   ├── store/
 │   │   └── usePulseStore.ts            # Zustand Offline-First store persisted in AsyncStorage
 │   ├── theme/
-│   │   ├── adaptive.ts                 # useAdaptiveLayout(), clampFont(), maxContentWidth=960 & Safe Areas
+│   │   ├── adaptive.ts                 # useSafeAreaFrame()-synced useAdaptiveLayout(), clampFont() & contentPadding
 │   │   └── colors.ts                   # Industrial high-contrast palette tokens
 │   ├── types/
 │   │   └── operations.ts               # FieldOperation, PhotoEvidence, OperatorProfile & SyncAttemptLog contracts
 │   └── utils/
 │       ├── hash.ts                     # expo-crypto SHA-256 digest & verification
 │       └── haptics.ts                  # Safe expo-haptics feedback helper
-└── __tests__/
-    ├── ledgerIntegrity.test.ts         # Hash chain linking, tampering, photo/operator mutation & order tests
-    ├── telemetry.test.ts               # Battery, accelerometer motion classification, photo & profile tests
-    ├── syncEngine.test.ts              # Network transitions, HTTP backoff, SHA-256 & V3 JSON/CSV export tests
-    ├── adaptive.test.ts                # Breakpoints, landscape Safe Areas, clampFont & 960dp maxWidth tests
-    └── biometricAuth.test.ts           # Hardware biometrics & SecureStore PIN enrollment tests
+├── __tests__/
+│   ├── ledgerIntegrity.test.ts         # Hash chain linking, tampering, photo/operator mutation & order tests
+│   ├── telemetry.test.ts               # Battery, accelerometer motion classification, photo & profile tests
+│   ├── syncEngine.test.ts              # Network transitions, HTTP backoff, SHA-256 & V3 JSON/CSV export tests
+│   ├── adaptive.test.ts                # Breakpoints, asymmetric landscape Safe Areas, clampFont & 960dp centering
+│   └── biometricAuth.test.ts           # Hardware biometrics & SecureStore PIN enrollment tests
+├── app.json                            # Expo SDK 58 config, native permissions & Android keyboard resize
+└── eas.json                            # EAS Build profiles (development, preview APK, production)
 ```
 
 ---
@@ -67,9 +70,13 @@ pulse-mobile/
 - **Battery & Motion (`expo-battery` + `expo-sensors`)**: Streams live battery level, charging state, and 3-axis accelerometer g-force (`500ms` sampling) to classify `STATIC` vs `MOVING_IN_FIELD`, with graceful degradation on Web or simulators.
 - **Operator Identity**: Persists `Operator ID`, `Callsign`, and `Unit / Sector` in `expo-secure-store`, signing every captured record and JSON/CSV audit export.
 
-### 4. High-Performance Virtualized Audit & Inspector (`app/(tabs)/queue.tsx`, `src/components/OperationInspectorModal.tsx`)
-- Replaced non-virtualized mapping with a multi-column `FlatList` (`keyExtractor`, `removeClippedSubviews`, `initialNumToRender`, `maxToRenderPerBatch`).
-- Tapping any record opens the **Cryptographic Inspector Modal** displaying full photo evidence, external Maps link (`Linking.openURL`), full `Payload Hash (SHA-256)`, `Previous Hash`, chain verification badge, and chronological `syncLog`.
+### 4. Multi-Device Adaptive Layout & Rotation Stability (`src/theme/adaptive.ts`, `app/(tabs)/_layout.tsx`)
+- **Atomic Native Frame + Insets**: `useAdaptiveLayout()` reads `useSafeAreaFrame()` on native iOS/Android so viewport dimensions and cutout/navigation-bar insets update atomically on orientation changes.
+- **Rotation-Safe Navigation**: Root `<Slot />` and `<Tabs detachInactiveScreens={false}>` prevent `react-native-screens` from clipping rotated screens to stale portrait bounds, while `contentPaddingLeft` / `contentPaddingRight` and `canSplitTwoColumns` keep rotated phones (`height < 500`) full-width without uneven voids or overflow.
+
+### 5. High-Performance Virtualized Audit & Inspector (`app/(tabs)/queue.tsx`, `src/components/OperationInspectorModal.tsx`)
+- Multi-column `FlatList` (`keyExtractor`, `initialNumToRender`, `maxToRenderPerBatch`, orientation-reactive `key`) handles large operation ledgers smoothly across portrait and landscape.
+- Tapping any record opens the orientation-aware **Cryptographic Inspector Modal** displaying full photo evidence, external Maps link (`Linking.openURL`), full `Payload Hash (SHA-256)`, `Previous Hash`, chain verification badge, and chronological `syncLog`.
 
 ---
 
@@ -82,10 +89,18 @@ npm install
 # Start Expo Dev Server (Android, iOS, Web)
 npm start
 
+# Run directly on Android / iOS / Web
+npm run android
+npm run ios
+npm run web
+
+# Build Android internal preview APK via EAS
+npx eas build --platform android --profile preview
+
 # Strict TypeScript check (0 errors)
 npx tsc --noEmit
 
-# Automated Jest suite (35 tests across 5 suites)
+# Automated Jest suite (37 tests across 5 suites)
 npm test -- --watchAll=false
 
 # Cross-platform Metro web bundle export
