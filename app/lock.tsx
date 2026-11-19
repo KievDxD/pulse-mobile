@@ -199,7 +199,7 @@ export default function LockScreen() {
     setStatusMessage('Terminal sealed. Biometric or PIN verification required to resume.');
   };
 
-  const isSplitLayout = layout.columns >= 2;
+  const isSplitLayout = layout.canSplitTwoColumns;
 
   const pinInstruction =
     setupStage === 'CREATE'
@@ -213,28 +213,30 @@ export default function LockScreen() {
   return (
     <ScrollView
       style={styles.root}
+      showsVerticalScrollIndicator
       contentContainerStyle={[
         styles.scrollContent,
         {
+          justifyContent: layout.isPhoneLandscape ? 'flex-start' : 'center',
+          gap: 18,
           paddingTop: layout.safePadding.top + 12,
           paddingBottom: layout.scrollBottomPadding,
-          paddingLeft: layout.safePadding.left,
-          paddingRight: layout.safePadding.right,
+          paddingLeft: layout.contentPaddingLeft,
+          paddingRight: layout.contentPaddingRight,
         },
       ]}
     >
-      <View style={[styles.container, { maxWidth: isSplitLayout ? layout.maxContentWidth : 480 }]}>
-        <View style={styles.headerBlock}>
-          <View style={styles.brandBadge}>
-            {isUnlocked ? (
-              <ShieldCheck size={16} color={COLORS.online} />
-            ) : (
-              <Lock size={16} color={COLORS.offline} />
-            )}
-            <Text style={styles.brandBadgeText} numberOfLines={1}>
-              PULSE // MOBILE • {isUnlocked ? `VERIFIED (${authMethod})` : 'SECURITY GATE V2.0'}
-            </Text>
-          </View>
+      <View style={styles.headerBlock}>
+        <View style={styles.brandBadge}>
+          {isUnlocked ? (
+            <ShieldCheck size={16} color={COLORS.online} />
+          ) : (
+            <Lock size={16} color={COLORS.offline} />
+          )}
+          <Text style={styles.brandBadgeText} numberOfLines={1}>
+            PULSE // MOBILE • {isUnlocked ? `VERIFIED (${authMethod})` : 'SECURITY GATE V3.0'}
+          </Text>
+        </View>
           <Text style={[styles.title, { fontSize: layout.typography.hero }]}>
             Field Terminal Security
           </Text>
@@ -397,7 +399,7 @@ export default function LockScreen() {
                           isControl && styles.keypadControlKey,
                           {
                             minWidth: MIN_TOUCH_TARGET_DP,
-                            minHeight: 52,
+                            minHeight: layout.isPhoneLandscape ? 48 : 52,
                             opacity: pressed ? 0.7 : 1,
                           },
                         ]}
@@ -422,7 +424,6 @@ export default function LockScreen() {
             </View>
           </View>
         </View>
-      </View>
     </ScrollView>
   );
 }
@@ -434,12 +435,6 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
-    justifyContent: 'center',
-  },
-  container: {
-    width: '100%',
-    alignSelf: 'center',
-    gap: 18,
   },
   headerBlock: {
     gap: 8,
@@ -482,6 +477,7 @@ const styles = StyleSheet.create({
   },
   splitColumn: {
     flex: 1,
+    minWidth: 0,
   },
   card: {
     backgroundColor: COLORS.card,

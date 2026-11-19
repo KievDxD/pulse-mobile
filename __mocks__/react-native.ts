@@ -13,3 +13,7 @@ export const useWindowDimensions = () => ({
 export const StyleSheet = {
   create: <T extends Record<string, unknown>>(styles: T): T => styles,
 };
+
+export const Linking = {
+  openURL: async (_url: string) => true,
+};

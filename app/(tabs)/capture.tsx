@@ -5,17 +5,35 @@ import {
   Camera,
   CheckCircle2,
   Crosshair,
+  Image as ImageIcon,
   QrCode,
   Radio,
   Send,
   ShieldCheck,
+  Trash2,
   X,
 } from 'lucide-react-native';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  Image,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { getNextChainLink } from '../../src/services/ledgerIntegrity';
+import {
+  captureEvidencePhoto,
+  pickEvidencePhotoFromLibrary,
+} from '../../src/services/photoEvidence';
 import {
   Coordinates,
   OperationCategory,
+  PhotoEvidence,
   PriorityLevel,
   usePulseStore,
 } from '../../src/store/usePulseStore';
@@ -42,6 +60,8 @@ export default function CaptureScreen() {
   const router = useRouter();
   const layout = useAdaptiveLayout();
 
+  const operations = usePulseStore((s) => s.operations);
+  const operatorProfile = usePulseStore((s) => s.operatorProfile);
   const networkMode = usePulseStore((s) => s.networkMode);
   const createOperation = usePulseStore((s) => s.createOperation);
 
@@ -66,11 +86,17 @@ export default function CaptureScreen() {
   const [checkpointId, setCheckpointId] = useState('');
   const [cameraMessage, setCameraMessage] = useState<string | null>(null);
 
+  // Real Photographic Evidence State
+  const [photoEvidence, setPhotoEvidence] = useState<PhotoEvidence | undefined>(undefined);
+  const [photoMessage, setPhotoMessage] = useState<string | null>(null);
+
   // Hash & Submission State
   const [liveHash, setLiveHash] = useState<string>('sha256:pending...');
   const [submitting, setSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [lastCommittedCode, setLastCommittedCode] = useState<string | null>(null);
+
+  const nextChain = useMemo(() => getNextChainLink(operations), [operations]);
 
   const resolvedCoordinates: Coordinates | null = useMemo(() => {
     if (coordinates) return coordinates;
@@ -91,14 +117,28 @@ export default function CaptureScreen() {
   const canonicalPreview = useMemo(
     () =>
       JSON.stringify({
+        chainIndex: nextChain.chainIndex,
+        prevHash: nextChain.prevHash,
         title: title.trim(),
         category,
         priority,
         coordinates: resolvedCoordinates,
         technicalNote: technicalNote.trim(),
         checkpointId: checkpointId.trim() || null,
+        photoEvidence: photoEvidence ?? null,
+        operatorProfile,
       }),
-    [title, category, priority, resolvedCoordinates, technicalNote, checkpointId]
+    [
+      nextChain,
+      title,
+      category,
+      priority,
+      resolvedCoordinates,
+      technicalNote,
+      checkpointId,
+      photoEvidence,
+      operatorProfile,
+    ]
   );
 
   const payloadBytes = useMemo(() => calculatePayloadBytes(canonicalPreview), [canonicalPreview]);
@@ -196,6 +236,34 @@ export default function CaptureScreen() {
     void triggerHaptic('success');
   };
 
+  const handleCapturePhoto = async () => {
+    await triggerHaptic('medium');
+    setPhotoMessage(null);
+    const res = await captureEvidencePhoto(resolvedCoordinates);
+    if (res.ok && res.evidence) {
+      await triggerHaptic('success');
+      setPhotoEvidence(res.evidence);
+      setPhotoMessage('Photo evidence sealed with UTC & EXIF metadata.');
+    } else if (!res.cancelled) {
+      await triggerHaptic('warning');
+      setPhotoMessage(res.error ?? 'Camera unavailable.');
+    }
+  };
+
+  const handlePickPhoto = async () => {
+    await triggerHaptic('light');
+    setPhotoMessage(null);
+    const res = await pickEvidencePhotoFromLibrary(resolvedCoordinates);
+    if (res.ok && res.evidence) {
+      await triggerHaptic('success');
+      setPhotoEvidence(res.evidence);
+      setPhotoMessage('Attached device image and linked to SHA-256 envelope.');
+    } else if (!res.cancelled) {
+      await triggerHaptic('warning');
+      setPhotoMessage(res.error ?? 'Unable to select image.');
+    }
+  };
+
   const handleSelectPriority = async (level: PriorityLevel) => {
     await triggerHaptic(level === 'CRITICAL' ? 'heavy' : 'light');
     setPriority(level);
@@ -230,166 +298,262 @@ export default function CaptureScreen() {
         coordinates: resolvedCoordinates,
         technicalNote,
         checkpointId: checkpointId.trim() || undefined,
+        photoEvidence,
       });
 
       await triggerHaptic('success');
-      setLastCommittedCode(created.code);
+      setLastCommittedCode(`${created.code} (Chain #${created.chainIndex})`);
       setTitle('');
       setTechnicalNote('');
       setCheckpointId('');
       setScannedType(null);
+      setPhotoEvidence(undefined);
+      setPhotoMessage(null);
     } finally {
       setSubmitting(false);
     }
   };
 
-  const isTwoCol = layout.columns >= 2;
+  const isTwoCol = layout.canSplitTwoColumns;
 
   return (
-    <ScrollView
+    <KeyboardAvoidingView
       style={styles.root}
-      contentContainerStyle={{
-        paddingTop: layout.spacing.md,
-        paddingBottom: layout.scrollBottomPadding,
-        paddingLeft: layout.safePadding.left,
-        paddingRight: layout.safePadding.right,
-      }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={[styles.container, { maxWidth: layout.maxContentWidth }]}>
+      <ScrollView
+        style={styles.root}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator
+        contentContainerStyle={{
+          flexGrow: 1,
+          gap: 14,
+          paddingTop: layout.spacing.md,
+          paddingBottom: layout.scrollBottomPadding,
+          paddingLeft: layout.contentPaddingLeft,
+          paddingRight: layout.contentPaddingRight,
+        }}
+      >
         <View style={styles.headerRow}>
           <View style={{ flex: 1, minWidth: 0 }}>
             <Text style={[styles.screenTitle, { fontSize: layout.typography.title }]} numberOfLines={1}>
               Field Operation Capture
             </Text>
             <Text style={styles.screenSubtitle} numberOfLines={2}>
-              Hardware GPS + Camera QR + SHA-256 • Mode:{' '}
+              Chain #{nextChain.chainIndex} • {operatorProfile.callsign} •{' '}
               {networkMode === 'OFFLINE' ? 'LOCAL OFFLINE QUEUE' : 'ONLINE AUTO-SYNC'}
             </Text>
           </View>
         </View>
 
         <View style={[styles.columnsWrap, isTwoCol && styles.columnsSplit, { gap: layout.gutter }]}>
-          {/* Left Column: Operation Details */}
-          <View style={[styles.card, isTwoCol && styles.colFlex, { padding: layout.cardPadding }]}>
-            <Text style={styles.fieldLabel}>OPERATION TITLE</Text>
-            <TextInput
-              value={title}
-              onChangeText={setTitle}
-              placeholder="Enter field inspection title..."
-              placeholderTextColor={COLORS.textMuted}
-              style={[styles.input, { minHeight: layout.minTouchTarget }]}
-            />
+          {/* Left Column: Operation Details + Photographic Evidence */}
+          <View style={[styles.rightStack, isTwoCol && styles.colFlex, { gap: layout.gutter }]}>
+            <View style={[styles.card, { padding: layout.cardPadding }]}>
+              <Text style={styles.fieldLabel}>OPERATION TITLE</Text>
+              <TextInput
+                value={title}
+                onChangeText={setTitle}
+                placeholder="Enter field inspection title..."
+                placeholderTextColor={COLORS.textMuted}
+                style={[styles.input, { minHeight: layout.minTouchTarget }]}
+              />
 
-            <Text style={styles.fieldLabel}>TACTILE PRIORITY</Text>
-            <View style={styles.priorityRow}>
-              {PRIORITIES.map((level) => {
-                const active = priority === level;
-                const activeColor =
-                  level === 'CRITICAL'
-                    ? COLORS.critical
-                    : level === 'HIGH'
-                    ? COLORS.offline
-                    : COLORS.online;
-                const activeBg =
-                  level === 'CRITICAL'
-                    ? COLORS.criticalBg
-                    : level === 'HIGH'
-                    ? COLORS.offlineBg
-                    : COLORS.onlineBg;
-                const activeBorder =
-                  level === 'CRITICAL'
-                    ? COLORS.criticalBorder
-                    : level === 'HIGH'
-                    ? COLORS.offlineBorder
-                    : COLORS.onlineBorder;
+              <Text style={styles.fieldLabel}>TACTILE PRIORITY</Text>
+              <View style={styles.priorityRow}>
+                {PRIORITIES.map((level) => {
+                  const active = priority === level;
+                  const activeColor =
+                    level === 'CRITICAL'
+                      ? COLORS.critical
+                      : level === 'HIGH'
+                      ? COLORS.offline
+                      : COLORS.online;
+                  const activeBg =
+                    level === 'CRITICAL'
+                      ? COLORS.criticalBg
+                      : level === 'HIGH'
+                      ? COLORS.offlineBg
+                      : COLORS.onlineBg;
+                  const activeBorder =
+                    level === 'CRITICAL'
+                      ? COLORS.criticalBorder
+                      : level === 'HIGH'
+                      ? COLORS.offlineBorder
+                      : COLORS.onlineBorder;
 
-                return (
-                  <Pressable
-                    key={level}
-                    onPress={() => handleSelectPriority(level)}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Priority ${level}`}
-                    style={({ pressed }) => [
-                      styles.priorityButton,
-                      {
-                        minHeight: 50,
-                        borderColor: active ? activeBorder : COLORS.border,
-                        backgroundColor: active ? activeBg : COLORS.surfaceElevated,
-                        opacity: pressed ? 0.8 : 1,
-                      },
-                    ]}
-                  >
-                    <View
-                      style={[
-                        styles.priorityDot,
-                        { backgroundColor: active ? activeColor : COLORS.textMuted },
+                  return (
+                    <Pressable
+                      key={level}
+                      onPress={() => handleSelectPriority(level)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Priority ${level}`}
+                      style={({ pressed }) => [
+                        styles.priorityButton,
+                        {
+                          minHeight: 50,
+                          borderColor: active ? activeBorder : COLORS.border,
+                          backgroundColor: active ? activeBg : COLORS.surfaceElevated,
+                          opacity: pressed ? 0.8 : 1,
+                        },
                       ]}
-                    />
-                    <Text
-                      style={[
-                        styles.priorityText,
-                        { color: active ? activeColor : COLORS.textSecondary },
-                      ]}
-                      numberOfLines={1}
                     >
-                      {level}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+                      <View
+                        style={[
+                          styles.priorityDot,
+                          { backgroundColor: active ? activeColor : COLORS.textMuted },
+                        ]}
+                      />
+                      <Text
+                        style={[
+                          styles.priorityText,
+                          { color: active ? activeColor : COLORS.textSecondary },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {level}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.fieldLabel}>OPERATIONAL CATEGORY</Text>
+              <View style={styles.categoryWrap}>
+                {CATEGORIES.map((cat) => {
+                  const active = category === cat;
+                  return (
+                    <Pressable
+                      key={cat}
+                      onPress={async () => {
+                        await triggerHaptic('light');
+                        setCategory(cat);
+                      }}
+                      style={({ pressed }) => [
+                        styles.categoryChip,
+                        {
+                          minHeight: layout.minTouchTarget,
+                          borderColor: active ? COLORS.primary : COLORS.border,
+                          backgroundColor: active ? COLORS.primary : COLORS.surfaceElevated,
+                          opacity: pressed ? 0.8 : 1,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.categoryText,
+                          { color: active ? COLORS.primaryText : COLORS.textSecondary },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {cat}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.fieldLabel}>TECHNICAL FIELD OBSERVATIONS</Text>
+              <TextInput
+                value={technicalNote}
+                onChangeText={setTechnicalNote}
+                multiline
+                numberOfLines={4}
+                placeholder="Record measurements, diagnostics, and corrective actions..."
+                placeholderTextColor={COLORS.textMuted}
+                textAlignVertical="top"
+                style={[styles.input, styles.textArea]}
+              />
             </View>
 
-            <Text style={styles.fieldLabel}>OPERATIONAL CATEGORY</Text>
-            <View style={styles.categoryWrap}>
-              {CATEGORIES.map((cat) => {
-                const active = category === cat;
-                return (
-                  <Pressable
-                    key={cat}
-                    onPress={async () => {
-                      await triggerHaptic('light');
-                      setCategory(cat);
-                    }}
-                    style={({ pressed }) => [
-                      styles.categoryChip,
-                      {
-                        minHeight: layout.minTouchTarget,
-                        borderColor: active ? COLORS.primary : COLORS.border,
-                        backgroundColor: active ? COLORS.primary : COLORS.surfaceElevated,
-                        opacity: pressed ? 0.8 : 1,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.categoryText,
-                        { color: active ? COLORS.primaryText : COLORS.textSecondary },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {cat}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
+            {/* Photographic Evidence Card */}
+            <View style={[styles.card, { padding: layout.cardPadding }]}>
+              <View style={styles.cardHeader}>
+                <Camera size={16} color={photoEvidence ? COLORS.online : COLORS.textPrimary} />
+                <Text style={styles.cardTitle} numberOfLines={1}>
+                  PHOTOGRAPHIC EVIDENCE (EXIF + GPS)
+                </Text>
+              </View>
 
-            <Text style={styles.fieldLabel}>TECHNICAL FIELD OBSERVATIONS</Text>
-            <TextInput
-              value={technicalNote}
-              onChangeText={setTechnicalNote}
-              multiline
-              numberOfLines={4}
-              placeholder="Record measurements, diagnostics, and corrective actions..."
-              placeholderTextColor={COLORS.textMuted}
-              textAlignVertical="top"
-              style={[styles.input, styles.textArea]}
-            />
+              {photoEvidence ? (
+                <View style={styles.evidenceBox}>
+                  <Image
+                    source={{ uri: photoEvidence.uri }}
+                    style={[
+                      styles.evidencePreview,
+                      { height: layout.isPhoneLandscape ? 120 : 150 },
+                    ]}
+                    resizeMode="cover"
+                  />
+                  <View style={styles.evidenceMetaRow}>
+                    <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                      <Text style={styles.telemetryVal} numberOfLines={1}>
+                        {photoEvidence.width} × {photoEvidence.height} px
+                      </Text>
+                      <Text style={styles.telemetryLine} numberOfLines={1}>
+                        {photoEvidence.exifSummary}
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => {
+                        setPhotoEvidence(undefined);
+                        setPhotoMessage(null);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel="Remove Photo Evidence"
+                      style={({ pressed }) => [
+                        styles.removePhotoBtn,
+                        {
+                          minWidth: layout.minTouchTarget,
+                          minHeight: layout.minTouchTarget,
+                          opacity: pressed ? 0.75 : 1,
+                        },
+                      ]}
+                    >
+                      <Trash2 size={16} color={COLORS.critical} />
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+
+              <View style={styles.photoButtonsRow}>
+                <Pressable
+                  onPress={handleCapturePhoto}
+                  accessibilityRole="button"
+                  accessibilityLabel="Capture Evidence Photo"
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    { minHeight: layout.minTouchTarget, flex: 1, opacity: pressed ? 0.8 : 1 },
+                  ]}
+                >
+                  <Camera size={15} color={COLORS.textPrimary} />
+                  <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                    TAKE PHOTO
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={handlePickPhoto}
+                  accessibilityRole="button"
+                  accessibilityLabel="Attach Photo From Device"
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    { minHeight: layout.minTouchTarget, flex: 1, opacity: pressed ? 0.8 : 1 },
+                  ]}
+                >
+                  <ImageIcon size={15} color={COLORS.textPrimary} />
+                  <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                    ATTACH IMAGE
+                  </Text>
+                </Pressable>
+              </View>
+
+              {photoMessage ? <Text style={styles.cameraNote}>{photoMessage}</Text> : null}
+            </View>
           </View>
 
-          {/* Right Column: Real GPS, Real QR Camera & SHA-256 Commit */}
+          {/* Right Column: Real GPS, Real QR Camera & SHA-256 Chain Commit */}
           <View style={[styles.rightStack, isTwoCol && styles.colFlex, { gap: layout.gutter }]}>
-            {/* Real Hardware GPS Card */}
             <View style={[styles.card, { padding: layout.cardPadding }]}>
               <View style={styles.cardHeader}>
                 <Crosshair
@@ -447,7 +611,7 @@ export default function CaptureScreen() {
               </Pressable>
 
               <View style={styles.manualCoordRow}>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.miniLabel}>LATITUDE</Text>
                   <TextInput
                     value={manualLat}
@@ -461,7 +625,7 @@ export default function CaptureScreen() {
                     style={[styles.input, { minHeight: layout.minTouchTarget }]}
                   />
                 </View>
-                <View style={{ flex: 1 }}>
+                <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={styles.miniLabel}>LONGITUDE</Text>
                   <TextInput
                     value={manualLng}
@@ -478,7 +642,6 @@ export default function CaptureScreen() {
               </View>
             </View>
 
-            {/* Real Camera QR / Barcode Card */}
             <View style={[styles.card, { padding: layout.cardPadding }]}>
               <View style={styles.cardHeader}>
                 <QrCode size={16} color={COLORS.textPrimary} />
@@ -488,7 +651,12 @@ export default function CaptureScreen() {
               </View>
 
               {scannerOpen ? (
-                <View style={styles.cameraContainer}>
+                <View
+                  style={[
+                    styles.cameraContainer,
+                    { height: layout.isPhoneLandscape ? 160 : 220 },
+                  ]}
+                >
                   <CameraView
                     style={styles.cameraView}
                     facing="back"
@@ -536,21 +704,23 @@ export default function CaptureScreen() {
               />
             </View>
 
-            {/* Real SHA-256 Digest & Commit */}
             <View style={[styles.card, { padding: layout.cardPadding }]}>
               <View style={styles.cardHeader}>
                 <ShieldCheck size={16} color={COLORS.online} />
                 <Text style={styles.cardTitle} numberOfLines={1}>
-                  REAL SHA-256 SEAL (EXPO-CRYPTO)
+                  TAMPER-EVIDENT CHAIN SEAL (SHA-256)
                 </Text>
               </View>
 
               <Text style={styles.hashPreview} numberOfLines={1}>
-                {formatShortHash(liveHash)}
+                NEXT: {formatShortHash(liveHash)}
               </Text>
               <Text style={styles.payloadText} numberOfLines={1}>
-                PAYLOAD: {payloadBytes} BYTES • TARGET:{' '}
-                {networkMode === 'OFFLINE' ? 'QUEUED_LOCAL' : 'AUTO_SYNC'}
+                PREV: {formatShortHash(nextChain.prevHash)}
+              </Text>
+              <Text style={styles.payloadText} numberOfLines={1}>
+                CHAIN #{nextChain.chainIndex} • {payloadBytes}B •{' '}
+                {photoEvidence ? 'WITH PHOTO' : 'TEXT+GPS'}
               </Text>
 
               {validationError ? <Text style={styles.errorText}>{validationError}</Text> : null}
@@ -559,14 +729,12 @@ export default function CaptureScreen() {
                 <View style={styles.successBanner}>
                   <CheckCircle2 size={16} color={COLORS.online} />
                   <View style={{ flex: 1, gap: 4 }}>
-                    <Text style={styles.successTitle}>
-                      {lastCommittedCode} SEALED & PERSISTED
-                    </Text>
+                    <Text style={styles.successTitle}>{lastCommittedCode} SEALED IN CHAIN</Text>
                     <Pressable
                       onPress={() => router.push('/(tabs)/queue')}
                       style={{ minHeight: 32, justifyContent: 'center' }}
                     >
-                      <Text style={styles.successLink}>Inspect packet in Sync Queue →</Text>
+                      <Text style={styles.successLink}>Inspect chain in Sync Queue →</Text>
                     </Pressable>
                   </View>
                 </View>
@@ -585,17 +753,17 @@ export default function CaptureScreen() {
                 <Send size={16} color={COLORS.primaryText} />
                 <Text style={styles.primaryButtonText} numberOfLines={1}>
                   {submitting
-                    ? 'SEALING & PERSISTING...'
+                    ? 'SEALING CHAIN RECORD...'
                     : networkMode === 'OFFLINE'
-                    ? 'SAVE TO OFFLINE QUEUE'
-                    : 'COMMIT & SYNC REPORT'}
+                    ? 'SEAL & QUEUE OFFLINE'
+                    : 'COMMIT & SYNC CHAIN RECORD'}
                 </Text>
               </Pressable>
             </View>
           </View>
         </View>
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -603,11 +771,6 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: COLORS.background,
-  },
-  container: {
-    width: '100%',
-    alignSelf: 'center',
-    gap: 14,
   },
   headerRow: {
     flexDirection: 'row',
@@ -634,9 +797,11 @@ const styles = StyleSheet.create({
   },
   colFlex: {
     flex: 1,
+    minWidth: 0,
   },
   rightStack: {
     flexDirection: 'column',
+    minWidth: 0,
   },
   card: {
     backgroundColor: COLORS.card,
@@ -690,6 +855,7 @@ const styles = StyleSheet.create({
   },
   priorityButton: {
     flex: 1,
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -726,6 +892,37 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.4,
+  },
+  evidenceBox: {
+    backgroundColor: COLORS.surfaceElevated,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.borderStrong,
+    overflow: 'hidden',
+  },
+  evidencePreview: {
+    width: '100%',
+    height: 150,
+  },
+  evidenceMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    padding: 10,
+  },
+  removePhotoBtn: {
+    backgroundColor: COLORS.criticalBg,
+    borderWidth: 1,
+    borderColor: COLORS.criticalBorder,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoButtonsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
   },
   telemetryBox: {
     backgroundColor: COLORS.surfaceElevated,
@@ -794,6 +991,7 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 11,
     fontWeight: '600',
+    fontFamily: 'monospace',
   },
   errorText: {
     color: COLORS.critical,
@@ -847,13 +1045,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.borderStrong,
     borderRadius: 8,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
   },
   secondaryButtonText: {
     color: COLORS.textPrimary,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '800',
-    letterSpacing: 0.5,
+    letterSpacing: 0.4,
     flexShrink: 1,
   },
 });

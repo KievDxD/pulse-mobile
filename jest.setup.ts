@@ -19,6 +19,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 jest.mock('react-native-safe-area-context', () => ({
   useSafeAreaInsets: jest.fn(() => ({ top: 47, bottom: 34, left: 0, right: 0 })),
+  useSafeAreaFrame: jest.fn(() => ({ x: 0, y: 0, width: 390, height: 844 })),
 }));
 
 jest.mock('expo-local-authentication', () => ({
@@ -110,6 +111,61 @@ jest.mock('expo-camera', () => ({
   useCameraPermissions: jest.fn(() => [{ granted: true }, jest.fn(async () => ({ granted: true }))]),
   Camera: {
     getCameraPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
+  },
+}));
+
+jest.mock('expo-image-picker', () => ({
+  requestCameraPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  requestMediaLibraryPermissionsAsync: jest.fn(async () => ({ granted: true })),
+  launchCameraAsync: jest.fn(async () => ({
+    canceled: false,
+    assets: [
+      {
+        uri: 'file:///cache/evidence-001.jpg',
+        width: 1920,
+        height: 1080,
+        fileSize: 245120,
+        exif: {
+          Make: 'Apple',
+          Model: 'iPhone 15 Pro',
+          DateTimeOriginal: '2026:11:18 18:00:00',
+        },
+      },
+    ],
+  })),
+  launchImageLibraryAsync: jest.fn(async () => ({
+    canceled: false,
+    assets: [
+      {
+        uri: 'file:///cache/library-001.jpg',
+        width: 1280,
+        height: 720,
+        fileSize: 180400,
+        exif: null,
+      },
+    ],
+  })),
+}));
+
+jest.mock('expo-battery', () => ({
+  BatteryState: {
+    UNKNOWN: 0,
+    UNPLUGGED: 1,
+    CHARGING: 2,
+    FULL: 3,
+    NOT_CHARGING: 4,
+  },
+  getBatteryLevelAsync: jest.fn(async () => 0.84),
+  getBatteryStateAsync: jest.fn(async () => 2),
+  addBatteryLevelListener: jest.fn(() => ({ remove: jest.fn() })),
+  addBatteryStateListener: jest.fn(() => ({ remove: jest.fn() })),
+}));
+
+jest.mock('expo-sensors', () => ({
+  Accelerometer: {
+    isAvailableAsync: jest.fn(async () => true),
+    setUpdateInterval: jest.fn(),
+    addListener: jest.fn(() => ({ remove: jest.fn() })),
   },
 }));
 

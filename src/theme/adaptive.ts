@@ -1,5 +1,5 @@
 import { Platform, useWindowDimensions } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export type DeviceBreakpoint = 'compact' | 'standard' | 'tablet';
 export type DeviceOrientation = 'portrait' | 'landscape';
@@ -24,16 +24,20 @@ export interface AdaptiveInput {
 export interface AdaptiveMetrics {
   width: number;
   height: number;
+  availableWidth: number;
   aspectRatio: number;
   breakpoint: DeviceBreakpoint;
   orientation: DeviceOrientation;
   platform: TargetPlatform;
   columns: GridColumns;
+  canSplitTwoColumns: boolean;
   minTouchTarget: number;
   clampedFontScale: number;
   clampFont: (size: number) => number;
   insets: SafeInsets;
   safePadding: SafeInsets;
+  contentPaddingLeft: number;
+  contentPaddingRight: number;
   scrollBottomPadding: number;
   tabBarHeight: number;
   spacing: {
@@ -57,6 +61,7 @@ export interface AdaptiveMetrics {
   isCompact: boolean;
   isTablet: boolean;
   isLandscape: boolean;
+  isPhoneLandscape: boolean;
 }
 
 export interface DevicePreset {
@@ -154,15 +159,38 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
   }
 
   const orientation: DeviceOrientation = width > height ? 'landscape' : 'portrait';
+  const isPhoneLandscape = orientation === 'landscape' && height < 500;
+
+  const horizontalBase =
+    breakpoint === 'compact' ? 12 : breakpoint === 'tablet' && !isPhoneLandscape ? 24 : 16;
+  const safePadding: SafeInsets = {
+    top: isPhoneLandscape
+      ? Math.max(insets.top, 4) + 4
+      : insets.top + (platform === 'ios' ? 6 : 8),
+    bottom: Math.max(insets.bottom, isPhoneLandscape ? 6 : 12),
+    left: Math.max(insets.left + (insets.left > 0 ? 8 : 0), horizontalBase),
+    right: Math.max(insets.right + (insets.right > 0 ? 8 : 0), horizontalBase),
+  };
+
+  const maxContentWidth = MAX_CONTENT_WIDTH_DP;
+  const innerUnclamped = Math.max(240, width - safePadding.left - safePadding.right);
+  const availableWidth = Math.max(240, Math.floor(Math.min(innerUnclamped, maxContentWidth)));
+  const extraCentering = Math.max(0, Math.floor((innerUnclamped - maxContentWidth) / 2));
+  const contentPaddingLeft = safePadding.left + extraCentering;
+  const contentPaddingRight = safePadding.right + extraCentering;
 
   let columns: GridColumns = 1;
-  if (width >= 900 || (breakpoint === 'tablet' && orientation === 'landscape')) {
+  if (!isPhoneLandscape && (width >= 900 || (breakpoint === 'tablet' && orientation === 'landscape'))) {
     columns = 3;
-  } else if (breakpoint === 'tablet' || (breakpoint === 'standard' && orientation === 'landscape')) {
+  } else if (availableWidth >= 520 || breakpoint === 'tablet') {
     columns = 2;
   }
 
-  const baseUnit = breakpoint === 'compact' ? 4 : breakpoint === 'tablet' ? 6 : 5;
+  // Only split multi-card forms/inspectors side-by-side on true tablets / desktops (never on short rotated phones).
+  const canSplitTwoColumns = !isPhoneLandscape && availableWidth >= 720;
+
+  const baseUnit =
+    breakpoint === 'compact' || isPhoneLandscape ? 4 : breakpoint === 'tablet' ? 6 : 5;
   const spacing = {
     xs: baseUnit,
     sm: baseUnit * 2,
@@ -171,25 +199,24 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
     xl: baseUnit * 6,
   };
 
-  const horizontalBase = breakpoint === 'compact' ? 12 : breakpoint === 'tablet' ? 24 : 16;
-  const safePadding: SafeInsets = {
-    top: insets.top + (platform === 'ios' ? 6 : 8),
-    bottom: Math.max(insets.bottom, 12),
-    left: Math.max(insets.left + (insets.left > 0 ? 8 : 0), horizontalBase),
-    right: Math.max(insets.right + (insets.right > 0 ? 8 : 0), horizontalBase),
-  };
-
-  const scrollBottomPadding = insets.bottom + 96;
-  const tabBarHeight = 58 + Math.max(insets.bottom, 8);
-  const gutter = breakpoint === 'compact' ? 10 : breakpoint === 'tablet' ? 16 : 12;
-  const cardPadding = breakpoint === 'compact' ? 12 : breakpoint === 'tablet' ? 18 : 14;
-  const maxContentWidth = MAX_CONTENT_WIDTH_DP;
+  const scrollBottomPadding = Math.max(insets.bottom, 12) + (isPhoneLandscape ? 72 : 96);
+  const tabBarHeight = isPhoneLandscape
+    ? 44 + Math.max(insets.bottom, 4)
+    : 58 + Math.max(insets.bottom, 8);
+  const gutter =
+    breakpoint === 'compact' || isPhoneLandscape ? 10 : breakpoint === 'tablet' ? 16 : 12;
+  const cardPadding =
+    breakpoint === 'compact' || isPhoneLandscape ? 12 : breakpoint === 'tablet' ? 18 : 14;
 
   const scale = (size: number) => clampFont(size, clampedFontScale);
 
   const typography = {
-    hero: scale(breakpoint === 'compact' ? 22 : breakpoint === 'tablet' ? 28 : 24),
-    title: scale(breakpoint === 'compact' ? 17 : breakpoint === 'tablet' ? 21 : 19),
+    hero: scale(
+      breakpoint === 'compact' ? 22 : breakpoint === 'tablet' && !isPhoneLandscape ? 28 : 24
+    ),
+    title: scale(
+      breakpoint === 'compact' ? 17 : breakpoint === 'tablet' && !isPhoneLandscape ? 21 : 19
+    ),
     subtitle: scale(breakpoint === 'compact' ? 14 : 16),
     body: scale(breakpoint === 'compact' ? 13 : 14),
     caption: scale(breakpoint === 'compact' ? 11 : 12),
@@ -199,16 +226,20 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
   return {
     width,
     height,
+    availableWidth,
     aspectRatio: Number((width / height).toFixed(2)),
     breakpoint,
     orientation,
     platform,
     columns,
+    canSplitTwoColumns,
     minTouchTarget: MIN_TOUCH_TARGET_DP,
     clampedFontScale,
     clampFont: scale,
     insets,
     safePadding,
+    contentPaddingLeft,
+    contentPaddingRight,
     scrollBottomPadding,
     tabBarHeight,
     spacing,
@@ -217,24 +248,29 @@ export function calculateAdaptiveMetrics(input: AdaptiveInput): AdaptiveMetrics 
     maxContentWidth,
     typography,
     isCompact: breakpoint === 'compact',
-    isTablet: breakpoint === 'tablet',
+    isTablet: breakpoint === 'tablet' && !isPhoneLandscape,
     isLandscape: orientation === 'landscape',
+    isPhoneLandscape,
   };
 }
 
 /**
- * Reactive React Native hook tracking real-time viewport dimensions, OS platform,
- * font accessibility scale, and safe-area insets for notches / Dynamic Island / nav bars.
+ * Reactive React Native hook tracking real-time native SafeArea frame dimensions
+ * (atomically synchronized with insets on orientation changes), OS platform, and font scale.
  */
 export function useAdaptiveLayout(): AdaptiveMetrics {
-  const { width, height, fontScale } = useWindowDimensions();
+  const windowDims = useWindowDimensions();
+  const frame = useSafeAreaFrame();
   const insets = useSafeAreaInsets();
   const platform = normalizePlatform(Platform.OS);
+
+  const width = platform !== 'web' && frame.width > 0 ? frame.width : windowDims.width;
+  const height = platform !== 'web' && frame.height > 0 ? frame.height : windowDims.height;
 
   return calculateAdaptiveMetrics({
     width,
     height,
-    fontScale,
+    fontScale: windowDims.fontScale,
     platform,
     insets,
   });

@@ -2,7 +2,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist, StateStorage } from 'zustand/middleware';
 import type { AuthMethod } from '../services/biometricAuth';
+import { getNextChainLink } from '../services/ledgerIntegrity';
 import { fetchRealNetworkStatus, RealNetworkStatus } from '../services/networkMonitor';
+import {
+  DEFAULT_OPERATOR_PROFILE,
+  loadOperatorProfile,
+  saveOperatorProfile,
+} from '../services/operatorProfile';
 import { syncOperationRecord } from '../services/syncClient';
 import {
   buildCanonicalOperationPayload,
@@ -11,7 +17,10 @@ import {
   FieldOperation,
   NetworkMode,
   OperationCategory,
+  OperatorProfile,
+  PhotoEvidence,
   PriorityLevel,
+  SyncAttemptLog,
   SyncStatus,
   SyncTransportMode,
 } from '../types/operations';
@@ -23,7 +32,10 @@ export type {
   FieldOperation,
   NetworkMode,
   OperationCategory,
+  OperatorProfile,
+  PhotoEvidence,
   PriorityLevel,
+  SyncAttemptLog,
   SyncStatus,
   SyncTransportMode,
 };
@@ -36,6 +48,7 @@ export interface SyncOptions {
 
 export interface PulseState {
   operations: FieldOperation[];
+  operatorProfile: OperatorProfile;
   networkMode: NetworkMode;
   networkInfo: RealNetworkStatus;
   syncEndpointUrl: string;
@@ -43,6 +56,10 @@ export interface PulseState {
   isUnlocked: boolean;
   authMethod: AuthMethod | null;
   lastSyncAt: string | null;
+  hydrateOperatorProfile: () => Promise<OperatorProfile>;
+  setOperatorProfile: (
+    profile: OperatorProfile
+  ) => Promise<{ ok: boolean; profile: OperatorProfile; error?: string }>;
   createOperation: (
     input: CreateOperationInput,
     options?: { autoSync?: boolean }
@@ -132,6 +149,7 @@ export const usePulseStore = create<PulseState>()(
   persist(
     (set, get) => ({
       operations: [],
+      operatorProfile: DEFAULT_OPERATOR_PROFILE,
       networkMode: 'ONLINE',
       networkInfo: DEFAULT_NETWORK_INFO,
       syncEndpointUrl: '',
@@ -140,21 +158,41 @@ export const usePulseStore = create<PulseState>()(
       authMethod: null,
       lastSyncAt: null,
 
+      hydrateOperatorProfile: async () => {
+        const stored = await loadOperatorProfile();
+        set({ operatorProfile: stored });
+        return stored;
+      },
+
+      setOperatorProfile: async (profile) => {
+        const result = await saveOperatorProfile(profile);
+        if (result.ok) {
+          set({ operatorProfile: result.profile });
+        }
+        return result;
+      },
+
       createOperation: async (input, options) => {
         const currentOps = get().operations;
         const code = nextOperationCode(currentOps);
         const createdAt = new Date().toISOString();
         const id = `op-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        const { prevHash, chainIndex } = getNextChainLink(currentOps);
+        const operatorProfile = get().operatorProfile;
 
         const seed = {
           id,
           code,
+          chainIndex,
+          prevHash,
           title: input.title.trim(),
           category: input.category,
           priority: input.priority,
           coordinates: input.coordinates,
           technicalNote: input.technicalNote.trim(),
           checkpointId: input.checkpointId?.trim() || undefined,
+          photoEvidence: input.photoEvidence,
+          operatorProfile,
           createdAt,
         };
 
@@ -162,12 +200,19 @@ export const usePulseStore = create<PulseState>()(
         const integrityHash = await generateIntegrityHashAsync(canonicalPayload);
         const payloadBytes = calculatePayloadBytes(canonicalPayload);
 
+        const initialLog: SyncAttemptLog = {
+          timestamp: createdAt,
+          outcome: 'QUEUED',
+          message: `Chain #${chainIndex} sealed (${operatorProfile.callsign}) and queued locally.`,
+        };
+
         const newOp: FieldOperation = {
           ...seed,
           syncStatus: 'QUEUED_LOCAL',
           integrityHash,
           payloadBytes,
           retryCount: 0,
+          syncLog: [initialLog],
         };
 
         set((state) => ({
@@ -244,9 +289,22 @@ export const usePulseStore = create<PulseState>()(
             const currentTarget = get().operations.find((op) => op.id === id);
             if (!currentTarget) continue;
 
+            const syncingEntry: SyncAttemptLog = {
+              timestamp: new Date().toISOString(),
+              outcome: 'SYNCING',
+              message: 'Dispatching SHA-256 verified payload...',
+            };
+
             set((state) => ({
               operations: state.operations.map((op) =>
-                op.id === id ? { ...op, syncStatus: 'SYNCING', lastError: undefined } : op
+                op.id === id
+                  ? {
+                      ...op,
+                      syncStatus: 'SYNCING',
+                      lastError: undefined,
+                      syncLog: [...(op.syncLog ?? []), syncingEntry],
+                    }
+                  : op
               ),
             }));
 
@@ -258,9 +316,20 @@ export const usePulseStore = create<PulseState>()(
             });
 
             if (get().networkMode === 'OFFLINE') {
+              const interruptedEntry: SyncAttemptLog = {
+                timestamp: new Date().toISOString(),
+                outcome: 'QUEUED',
+                message: 'Device went offline mid-flight; returned packet to local queue.',
+              };
               set((state) => ({
                 operations: state.operations.map((op) =>
-                  op.id === id ? { ...op, syncStatus: 'QUEUED_LOCAL' } : op
+                  op.id === id
+                    ? {
+                        ...op,
+                        syncStatus: 'QUEUED_LOCAL',
+                        syncLog: [...(op.syncLog ?? []), interruptedEntry],
+                      }
+                    : op
                 ),
               }));
               break;
@@ -269,6 +338,15 @@ export const usePulseStore = create<PulseState>()(
             if (result.ok) {
               synced += 1;
               const syncedAt = result.syncedAt ?? new Date().toISOString();
+              const successEntry: SyncAttemptLog = {
+                timestamp: syncedAt,
+                outcome: 'SUCCESS',
+                mode: result.mode,
+                statusCode: result.statusCode,
+                latencyMs: result.latencyMs,
+                message: `Verified & replicated via ${result.mode} (${result.latencyMs}ms).`,
+              };
+
               set((state) => ({
                 lastSyncAt: syncedAt,
                 operations: state.operations.map((op) =>
@@ -280,12 +358,23 @@ export const usePulseStore = create<PulseState>()(
                         syncedAt,
                         latencyMs: result.latencyMs,
                         lastError: undefined,
+                        syncLog: [...(op.syncLog ?? []), successEntry],
                       }
                     : op
                 ),
               }));
             } else {
               failed += 1;
+              const errMsg = result.error ?? 'Synchronization failed.';
+              const failEntry: SyncAttemptLog = {
+                timestamp: new Date().toISOString(),
+                outcome: 'FAILED',
+                mode: result.mode,
+                statusCode: result.statusCode,
+                latencyMs: result.latencyMs,
+                message: errMsg,
+              };
+
               set((state) => ({
                 operations: state.operations.map((op) =>
                   op.id === id
@@ -295,7 +384,8 @@ export const usePulseStore = create<PulseState>()(
                         syncMode: result.mode,
                         retryCount: op.retryCount + 1,
                         latencyMs: result.latencyMs,
-                        lastError: result.error ?? 'Synchronization failed.',
+                        lastError: errMsg,
+                        syncLog: [...(op.syncLog ?? []), failEntry],
                       }
                     : op
                 ),
@@ -314,6 +404,11 @@ export const usePulseStore = create<PulseState>()(
         if (!target) return false;
 
         if (get().networkMode === 'OFFLINE') {
+          const deferredEntry: SyncAttemptLog = {
+            timestamp: new Date().toISOString(),
+            outcome: 'QUEUED',
+            message: 'Retry deferred: device is offline.',
+          };
           set((state) => ({
             operations: state.operations.map((op) =>
               op.id === id
@@ -321,6 +416,7 @@ export const usePulseStore = create<PulseState>()(
                     ...op,
                     syncStatus: 'QUEUED_LOCAL',
                     lastError: 'Device offline. Packet stays queued until connectivity resumes.',
+                    syncLog: [...(op.syncLog ?? []), deferredEntry],
                   }
                 : op
             ),
@@ -328,9 +424,22 @@ export const usePulseStore = create<PulseState>()(
           return false;
         }
 
+        const retryingEntry: SyncAttemptLog = {
+          timestamp: new Date().toISOString(),
+          outcome: 'SYNCING',
+          message: `Manual retry #${target.retryCount + 1} initiated.`,
+        };
+
         set((state) => ({
           operations: state.operations.map((op) =>
-            op.id === id ? { ...op, syncStatus: 'SYNCING', lastError: undefined } : op
+            op.id === id
+              ? {
+                  ...op,
+                  syncStatus: 'SYNCING',
+                  lastError: undefined,
+                  syncLog: [...(op.syncLog ?? []), retryingEntry],
+                }
+              : op
           ),
         }));
 
@@ -343,6 +452,14 @@ export const usePulseStore = create<PulseState>()(
 
         if (result.ok) {
           const syncedAt = result.syncedAt ?? new Date().toISOString();
+          const successEntry: SyncAttemptLog = {
+            timestamp: syncedAt,
+            outcome: 'SUCCESS',
+            mode: result.mode,
+            statusCode: result.statusCode,
+            latencyMs: result.latencyMs,
+            message: `Retry succeeded via ${result.mode} (${result.latencyMs}ms).`,
+          };
           set((state) => ({
             lastSyncAt: syncedAt,
             operations: state.operations.map((op) =>
@@ -354,6 +471,7 @@ export const usePulseStore = create<PulseState>()(
                     syncedAt,
                     latencyMs: result.latencyMs,
                     lastError: undefined,
+                    syncLog: [...(op.syncLog ?? []), successEntry],
                   }
                 : op
             ),
@@ -361,6 +479,15 @@ export const usePulseStore = create<PulseState>()(
           return true;
         }
 
+        const errMsg = result.error ?? 'Retry failed.';
+        const failEntry: SyncAttemptLog = {
+          timestamp: new Date().toISOString(),
+          outcome: 'FAILED',
+          mode: result.mode,
+          statusCode: result.statusCode,
+          latencyMs: result.latencyMs,
+          message: errMsg,
+        };
         set((state) => ({
           operations: state.operations.map((op) =>
             op.id === id
@@ -370,7 +497,8 @@ export const usePulseStore = create<PulseState>()(
                   syncMode: result.mode,
                   retryCount: op.retryCount + 1,
                   latencyMs: result.latencyMs,
-                  lastError: result.error ?? 'Retry failed.',
+                  lastError: errMsg,
+                  syncLog: [...(op.syncLog ?? []), failEntry],
                 }
               : op
           ),
@@ -395,10 +523,11 @@ export const usePulseStore = create<PulseState>()(
       },
     }),
     {
-      name: 'pulse-mobile-store-v2',
+      name: 'pulse-mobile-store-v3',
       storage: createJSONStorage(() => safeAsyncStorage),
       partialize: (state) => ({
         operations: state.operations,
+        operatorProfile: state.operatorProfile,
         syncEndpointUrl: state.syncEndpointUrl,
         lastSyncAt: state.lastSyncAt,
       }),

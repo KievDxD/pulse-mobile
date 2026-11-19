@@ -8,7 +8,7 @@ import {
   normalizePlatform,
 } from '../src/theme/adaptive';
 
-describe('Multi-Device Adaptive Layout & Safe Area Engine (V2.0)', () => {
+describe('Multi-Device Adaptive Layout, Phone Landscape & Safe Area Engine (V3.0)', () => {
   it('classifies compact devices (< 380dp) in portrait with 1 column and safe padding', () => {
     const metrics = calculateAdaptiveMetrics({
       width: 320,
@@ -21,11 +21,13 @@ describe('Multi-Device Adaptive Layout & Safe Area Engine (V2.0)', () => {
     expect(metrics.orientation).toBe('portrait');
     expect(metrics.columns).toBe(1);
     expect(metrics.isCompact).toBe(true);
+    expect(metrics.isPhoneLandscape).toBe(false);
+    expect(metrics.canSplitTwoColumns).toBe(false);
     expect(metrics.minTouchTarget).toBe(MIN_TOUCH_TARGET_DP);
     expect(metrics.maxContentWidth).toBe(MAX_CONTENT_WIDTH_DP);
   });
 
-  it('classifies standard devices (380dp-599dp) and adapts columns + left/right cutout insets in landscape', () => {
+  it('classifies standard devices (380dp-599dp) and caps rotated phones at 2 columns with compact chrome', () => {
     const portrait = calculateAdaptiveMetrics({
       width: 412,
       height: 915,
@@ -36,20 +38,41 @@ describe('Multi-Device Adaptive Layout & Safe Area Engine (V2.0)', () => {
     expect(portrait.breakpoint).toBe('standard');
     expect(portrait.orientation).toBe('portrait');
     expect(portrait.columns).toBe(1);
+    expect(portrait.isPhoneLandscape).toBe(false);
     expect(portrait.scrollBottomPadding).toBe(24 + 96);
 
-    const landscape = calculateAdaptiveMetrics({
+    const phoneLandscape = calculateAdaptiveMetrics({
       width: 915,
       height: 412,
       platform: 'android',
       insets: { top: 24, bottom: 16, left: 36, right: 36 },
     });
 
-    expect(landscape.orientation).toBe('landscape');
-    expect(landscape.columns).toBe(3);
-    expect(landscape.safePadding.left).toBe(44);
-    expect(landscape.safePadding.right).toBe(44);
-    expect(landscape.scrollBottomPadding).toBe(16 + 96);
+    expect(phoneLandscape.orientation).toBe('landscape');
+    expect(phoneLandscape.isPhoneLandscape).toBe(true);
+    expect(phoneLandscape.columns).toBe(2);
+    // Short rotated phones keep forms/Device Lab single-column to prevent clipped/uneven voids
+    expect(phoneLandscape.canSplitTwoColumns).toBe(false);
+    expect(phoneLandscape.safePadding.left).toBe(44);
+    expect(phoneLandscape.safePadding.right).toBe(44);
+    expect(phoneLandscape.contentPaddingLeft).toBe(44);
+    expect(phoneLandscape.contentPaddingRight).toBe(44);
+    expect(phoneLandscape.availableWidth).toBe(915 - 44 - 44);
+    expect(phoneLandscape.tabBarHeight).toBe(44 + 16);
+    expect(phoneLandscape.scrollBottomPadding).toBe(16 + 72);
+  });
+
+  it('keeps narrow rotated phones (667x375) single-column for split forms (canSplitTwoColumns=false)', () => {
+    const metrics = calculateAdaptiveMetrics({
+      width: 667,
+      height: 375,
+      platform: 'ios',
+    });
+
+    expect(metrics.isPhoneLandscape).toBe(true);
+    expect(metrics.columns).toBe(2);
+    expect(metrics.canSplitTwoColumns).toBe(false);
+    expect(metrics.availableWidth).toBe(667 - 32);
   });
 
   it('classifies standard-width landscape (560x360) with 2 columns', () => {
@@ -61,6 +84,7 @@ describe('Multi-Device Adaptive Layout & Safe Area Engine (V2.0)', () => {
 
     expect(metrics.breakpoint).toBe('standard');
     expect(metrics.orientation).toBe('landscape');
+    expect(metrics.isPhoneLandscape).toBe(true);
     expect(metrics.columns).toBe(2);
   });
 
@@ -73,7 +97,10 @@ describe('Multi-Device Adaptive Layout & Safe Area Engine (V2.0)', () => {
     });
 
     expect(portrait.breakpoint).toBe('tablet');
+    expect(portrait.isTablet).toBe(true);
+    expect(portrait.isPhoneLandscape).toBe(false);
     expect(portrait.columns).toBe(2);
+    expect(portrait.canSplitTwoColumns).toBe(true);
     expect(portrait.maxContentWidth).toBe(960);
 
     const landscape = calculateAdaptiveMetrics({
@@ -85,11 +112,32 @@ describe('Multi-Device Adaptive Layout & Safe Area Engine (V2.0)', () => {
 
     expect(landscape.breakpoint).toBe('tablet');
     expect(landscape.orientation).toBe('landscape');
+    expect(landscape.isPhoneLandscape).toBe(false);
     expect(landscape.columns).toBe(3);
-    expect(landscape.maxContentWidth).toBe(960);
+    expect(landscape.canSplitTwoColumns).toBe(true);
+    expect(landscape.availableWidth).toBe(960);
+    // 1194 - 24 - 24 = 1146; extraCentering = floor((1146 - 960) / 2) = 93
+    expect(landscape.contentPaddingLeft).toBe(24 + 93);
+    expect(landscape.contentPaddingRight).toBe(24 + 93);
   });
 
-  it('computes dynamic tabBarHeight and scrollBottomPadding from insets.bottom', () => {
+  it('handles asymmetric Android cutout + navigation bar insets in landscape without overflow', () => {
+    const asymmetric = calculateAdaptiveMetrics({
+      width: 892,
+      height: 412,
+      platform: 'android',
+      insets: { top: 24, bottom: 0, left: 36, right: 48 },
+    });
+
+    expect(asymmetric.isPhoneLandscape).toBe(true);
+    expect(asymmetric.canSplitTwoColumns).toBe(false);
+    expect(asymmetric.contentPaddingLeft).toBe(44);
+    expect(asymmetric.contentPaddingRight).toBe(56);
+    expect(asymmetric.availableWidth).toBe(892 - 44 - 56);
+    expect(asymmetric.contentPaddingLeft + asymmetric.availableWidth + asymmetric.contentPaddingRight).toBe(892);
+  });
+
+  it('computes dynamic tabBarHeight and scrollBottomPadding from insets.bottom in portrait', () => {
     const iosNotch = calculateAdaptiveMetrics({
       width: 393,
       height: 852,

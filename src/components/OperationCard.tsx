@@ -1,14 +1,17 @@
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
   Clock,
+  Link2,
   MapPin,
   QrCode,
   RefreshCw,
   Shield,
+  UserCheck,
 } from 'lucide-react-native';
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MIN_TOUCH_TARGET_DP } from '../theme/adaptive';
 import { COLORS } from '../theme/colors';
 import type { FieldOperation, PriorityLevel, SyncStatus } from '../types/operations';
@@ -18,6 +21,8 @@ interface OperationCardProps {
   operation: FieldOperation;
   compact?: boolean;
   detailed?: boolean;
+  chainValid?: boolean;
+  onPress?: (operation: FieldOperation) => void;
   onRetry?: (id: string) => void;
 }
 
@@ -81,6 +86,8 @@ export function OperationCard({
   operation,
   compact = false,
   detailed = false,
+  chainValid = true,
+  onPress,
   onRetry,
 }: OperationCardProps) {
   const priorityStyle = getPriorityStyle(operation.priority);
@@ -99,12 +106,18 @@ export function OperationCard({
       ? ` • ${Math.round(coords.altitudeMeters)}m ALT`
       : '';
 
-  return (
-    <View style={[styles.card, { padding: compact ? 12 : 16 }]}>
+  const cardInner = (
+    <View
+      style={[
+        styles.card,
+        !chainValid && styles.cardTampered,
+        { padding: compact ? 12 : 16 },
+      ]}
+    >
       <View style={styles.topRow}>
         <View style={styles.codeGroup}>
           <Text style={styles.codeText} numberOfLines={1}>
-            {operation.code}
+            #{operation.chainIndex} • {operation.code}
           </Text>
           <View
             style={[
@@ -139,18 +152,43 @@ export function OperationCard({
         </View>
       </View>
 
-      <Text style={[styles.title, { fontSize: compact ? 15 : 16 }]} numberOfLines={2}>
-        {operation.title}
-      </Text>
+      <View style={styles.headlineRow}>
+        <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+          <Text style={[styles.title, { fontSize: compact ? 15 : 16 }]} numberOfLines={2}>
+            {operation.title}
+          </Text>
+          <Text style={styles.note} numberOfLines={detailed ? 4 : 2}>
+            {operation.technicalNote}
+          </Text>
+        </View>
 
-      <Text style={styles.note} numberOfLines={detailed ? 5 : 2}>
-        {operation.technicalNote}
-      </Text>
+        {operation.photoEvidence ? (
+          <View style={styles.thumbFrame}>
+            <Image
+              source={{ uri: operation.photoEvidence.uri }}
+              style={styles.thumbImage}
+              resizeMode="cover"
+            />
+            <View style={styles.thumbBadge}>
+              <Camera size={10} color={COLORS.textPrimary} />
+            </View>
+          </View>
+        ) : null}
+      </View>
 
       <View style={styles.metaGrid}>
         <View style={styles.metaItem}>
+          <UserCheck size={13} color={COLORS.textMuted} />
+          <Text style={styles.metaText} numberOfLines={1}>
+            {operation.operatorProfile?.callsign ?? 'FIELD-UNIT'} (
+            {operation.operatorProfile?.operatorId ?? 'OP'}) •{' '}
+            {operation.operatorProfile?.unitSector ?? 'SECTOR'}
+          </Text>
+        </View>
+
+        <View style={styles.metaItem}>
           <MapPin size={13} color={COLORS.textMuted} />
-          <Text style={styles.metaText} numberOfLines={2}>
+          <Text style={styles.metaText} numberOfLines={1}>
             {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} ({accuracyLabel}
             {altitudeLabel})
           </Text>
@@ -166,9 +204,16 @@ export function OperationCard({
         ) : null}
 
         <View style={styles.metaItem}>
-          <Shield size={13} color={COLORS.textMuted} />
-          <Text style={styles.monoText} numberOfLines={detailed ? 2 : 1}>
-            {detailed ? operation.integrityHash : formatShortHash(operation.integrityHash)}
+          <Shield size={13} color={chainValid ? COLORS.online : COLORS.critical} />
+          <Text style={styles.monoText} numberOfLines={1}>
+            HASH: {formatShortHash(operation.integrityHash)}
+          </Text>
+        </View>
+
+        <View style={styles.metaItem}>
+          <Link2 size={13} color={COLORS.textMuted} />
+          <Text style={styles.monoText} numberOfLines={1}>
+            PREV: {formatShortHash(operation.prevHash)}
           </Text>
         </View>
       </View>
@@ -178,7 +223,7 @@ export function OperationCard({
           {operation.category}
         </Text>
         <Text style={styles.footerStat} numberOfLines={1}>
-          {operation.payloadBytes}B • RETRY {operation.retryCount}
+          {operation.payloadBytes}B • LOGS: {operation.syncLog?.length ?? 1}
           {operation.syncMode
             ? ` • ${operation.syncMode === 'REMOTE_HTTP' ? 'HTTP' : 'LEDGER'}`
             : ''}
@@ -190,7 +235,14 @@ export function OperationCard({
         ) : null}
       </View>
 
-      {operation.lastError ? (
+      {!chainValid ? (
+        <View style={styles.errorBanner}>
+          <AlertTriangle size={14} color={COLORS.critical} />
+          <Text style={styles.errorText}>
+            TAMPER_DETECTED: Hash or chain pointer integrity verification failed.
+          </Text>
+        </View>
+      ) : operation.lastError ? (
         <View style={styles.errorBanner}>
           <AlertTriangle size={14} color={COLORS.critical} />
           <Text style={styles.errorText}>{operation.lastError}</Text>
@@ -199,7 +251,10 @@ export function OperationCard({
 
       {canRetry ? (
         <Pressable
-          onPress={() => onRetry?.(operation.id)}
+          onPress={(e) => {
+            e.stopPropagation?.();
+            onRetry?.(operation.id);
+          }}
           accessibilityRole="button"
           accessibilityLabel={`Retry sync for ${operation.code}`}
           style={({ pressed }) => [
@@ -215,6 +270,19 @@ export function OperationCard({
       ) : null}
     </View>
   );
+
+  if (!onPress) return cardInner;
+
+  return (
+    <Pressable
+      onPress={() => onPress(operation)}
+      accessibilityRole="button"
+      accessibilityLabel={`Inspect cryptographic details for ${operation.code}`}
+      style={({ pressed }) => ({ opacity: pressed ? 0.9 : 1 })}
+    >
+      {cardInner}
+    </Pressable>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -224,6 +292,9 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     borderRadius: 12,
     gap: 10,
+  },
+  cardTampered: {
+    borderColor: COLORS.criticalBorder,
   },
   topRow: {
     flexDirection: 'row',
@@ -242,7 +313,7 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
     fontVariant: ['tabular-nums'],
     flexShrink: 1,
   },
@@ -262,6 +333,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
     flexShrink: 1,
   },
+  headlineRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
   title: {
     color: COLORS.textPrimary,
     fontWeight: '700',
@@ -271,6 +347,28 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 13,
     lineHeight: 19,
+  },
+  thumbFrame: {
+    width: 60,
+    height: 60,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: COLORS.borderStrong,
+    backgroundColor: COLORS.surfaceElevated,
+    flexShrink: 0,
+  },
+  thumbImage: {
+    width: '100%',
+    height: '100%',
+  },
+  thumbBadge: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(9,9,11,0.78)',
+    borderRadius: 4,
+    padding: 3,
   },
   metaGrid: {
     gap: 5,

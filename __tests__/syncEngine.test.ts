@@ -252,17 +252,21 @@ describe('Real Network, SHA-256 Crypto, Sync Client & Audit Store (V2.0)', () =>
 
     const jsonStr = formatOperationsAsJson([op]);
     const parsed = JSON.parse(jsonStr);
-    expect(parsed.schema).toBe('pulse-mobile-audit-v2');
+    expect(parsed.schema).toBe('pulse-mobile-audit-v3');
     expect(parsed.recordCount).toBe(1);
+    expect(parsed.operatorProfile).toBeDefined();
     expect(parsed.operations[0].integrityHash).toBe(op.integrityHash);
+    expect(op.syncLog.length).toBeGreaterThanOrEqual(2);
 
     const csvStr = formatOperationsAsCsv([op]);
     expect(csvStr).toContain('integrityHash');
+    expect(csvStr).toContain('chainStatus');
     expect(csvStr).toContain('"Generator Load Test, Bay ""A"""');
 
     const exported = await exportOperationsAudit([op], 'csv');
     expect(exported.ok).toBe(true);
     expect(exported.recordCount).toBe(1);
+    expect(exported.chainStatus).toBe('VERIFIED_CHAIN');
     expect(exported.filename).toMatch(/^pulse-audit-.*\.csv$/);
   });
 

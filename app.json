@@ -2,7 +2,7 @@
   "expo": {
     "name": "PULSE // MOBILE",
     "slug": "pulse-mobile",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "orientation": "default",
     "scheme": "pulse-mobile",
     "userInterfaceStyle": "dark",
@@ -11,11 +11,13 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSFaceIDUsageDescription": "PULSE // MOBILE uses Face ID to authorize field operations and encrypted offline storage.",
-        "NSCameraUsageDescription": "PULSE // MOBILE uses the camera to scan physical QR and barcode checkpoints in the field.",
+        "NSCameraUsageDescription": "PULSE // MOBILE uses the camera to scan physical QR checkpoints and capture sealed field evidence photos.",
+        "NSPhotoLibraryUsageDescription": "PULSE // MOBILE allows attaching field inspection photos when direct camera hardware is unavailable.",
         "NSLocationWhenInUseUsageDescription": "PULSE // MOBILE captures real GPS coordinates, altitude, and accuracy for field operations."
       }
     },
     "android": {
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#09090B"
       },
@@ -39,6 +41,7 @@
       "expo-local-authentication",
       "expo-camera",
       "expo-location",
+      "expo-image-picker",
       "expo-sharing"
     ],
     "experiments": {

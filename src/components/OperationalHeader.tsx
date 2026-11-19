@@ -14,19 +14,22 @@ export function OperationalHeader() {
 
   const networkMode = usePulseStore((s) => s.networkMode);
   const networkInfo = usePulseStore((s) => s.networkInfo);
+  const operatorProfile = usePulseStore((s) => s.operatorProfile);
   const isSyncing = usePulseStore((s) => s.isSyncing);
   const isUnlocked = usePulseStore((s) => s.isUnlocked);
   const authMethod = usePulseStore((s) => s.authMethod);
   const operations = usePulseStore((s) => s.operations);
   const applyRealNetworkStatus = usePulseStore((s) => s.applyRealNetworkStatus);
   const refreshNetworkStatus = usePulseStore((s) => s.refreshNetworkStatus);
+  const hydrateOperatorProfile = usePulseStore((s) => s.hydrateOperatorProfile);
 
   useEffect(() => {
+    void hydrateOperatorProfile();
     const unsubscribe = subscribeToNetworkStatus((status) => {
       void applyRealNetworkStatus(status);
     });
     return unsubscribe;
-  }, [applyRealNetworkStatus]);
+  }, [applyRealNetworkStatus, hydrateOperatorProfile]);
 
   const pendingCount = operations.filter(
     (op) => op.syncStatus === 'QUEUED_LOCAL' || op.syncStatus === 'SYNC_FAILED'
@@ -57,18 +60,21 @@ export function OperationalHeader() {
     ? networkInfo.type
     : 'ONLINE';
 
+  const actionMinHeight = layout.isPhoneLandscape ? 42 : layout.minTouchTarget;
+
   return (
     <View
       style={[
         styles.wrapper,
         {
           paddingTop: layout.safePadding.top,
-          paddingLeft: layout.safePadding.left,
-          paddingRight: layout.safePadding.right,
+          paddingBottom: layout.isPhoneLandscape ? 6 : 10,
+          paddingLeft: layout.contentPaddingLeft,
+          paddingRight: layout.contentPaddingRight,
         },
       ]}
     >
-      <View style={[styles.inner, { maxWidth: layout.maxContentWidth }]}>
+      <View style={styles.inner}>
         <View style={styles.brandBlock}>
           <View style={styles.brandRow}>
             <View
@@ -88,14 +94,16 @@ export function OperationalHeader() {
             </Text>
             <View style={styles.versionBadge}>
               <Text style={styles.versionText} numberOfLines={1}>
-                V2.0
+                V3.0
               </Text>
             </View>
           </View>
-          <Text style={styles.subline} numberOfLines={1}>
-            {layout.breakpoint.toUpperCase()} • {layout.columns}COL
-            {!layout.isCompact && networkInfo.ipAddress ? ` • ${networkInfo.ipAddress}` : ''}
-          </Text>
+          {!layout.isPhoneLandscape ? (
+            <Text style={styles.subline} numberOfLines={1}>
+              {operatorProfile.callsign} • {layout.breakpoint.toUpperCase()} • {layout.columns}COL
+              {!layout.isCompact && networkInfo.ipAddress ? ` • ${networkInfo.ipAddress}` : ''}
+            </Text>
+          ) : null}
         </View>
 
         <View style={styles.actionsRow}>
@@ -107,7 +115,7 @@ export function OperationalHeader() {
               styles.securityButton,
               {
                 minWidth: layout.minTouchTarget,
-                minHeight: layout.minTouchTarget,
+                minHeight: actionMinHeight,
                 borderColor: isUnlocked ? COLORS.onlineBorder : COLORS.offlineBorder,
                 backgroundColor: isUnlocked ? COLORS.onlineBg : COLORS.offlineBg,
                 opacity: pressed ? 0.78 : 1,
@@ -137,7 +145,7 @@ export function OperationalHeader() {
             style={({ pressed }) => [
               styles.networkButton,
               {
-                minHeight: layout.minTouchTarget,
+                minHeight: actionMinHeight,
                 borderColor: isOnline ? COLORS.onlineBorder : COLORS.offlineBorder,
                 backgroundColor: isOnline ? COLORS.onlineBg : COLORS.offlineBg,
                 opacity: pressed ? 0.78 : 1,
@@ -182,11 +190,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
-    paddingBottom: 10,
   },
   inner: {
-    width: '100%',
-    alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',

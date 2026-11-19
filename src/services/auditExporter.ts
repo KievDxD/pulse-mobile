@@ -1,7 +1,9 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { Platform } from 'react-native';
-import type { FieldOperation } from '../types/operations';
+import type { FieldOperation, OperatorProfile } from '../types/operations';
+import { LedgerIntegrityReport, verifyLedgerIntegrity } from './ledgerIntegrity';
+import { DEFAULT_OPERATOR_PROFILE } from './operatorProfile';
 
 export type AuditExportFormat = 'json' | 'csv';
 
@@ -9,6 +11,7 @@ export interface ExportAuditResult {
   ok: boolean;
   filename: string;
   recordCount: number;
+  chainStatus: LedgerIntegrityReport['status'];
   method: 'NATIVE_SHARE' | 'WEB_DOWNLOAD' | 'MEMORY_ONLY';
   error?: string;
 }
@@ -23,14 +26,20 @@ function escapeCsvField(value: string | number | null | undefined): string {
 }
 
 /**
- * Serializes field operations with full SHA-256 hashes and GPS telemetry into JSON.
+ * Serializes field operations with chain verification, operator identity, GPS, photo metadata, and SHA-256 hashes into JSON.
  */
-export function formatOperationsAsJson(operations: FieldOperation[]): string {
+export function formatOperationsAsJson(
+  operations: FieldOperation[],
+  chainVerification?: LedgerIntegrityReport,
+  operatorProfile: OperatorProfile = DEFAULT_OPERATOR_PROFILE
+): string {
   return JSON.stringify(
     {
-      schema: 'pulse-mobile-audit-v2',
+      schema: 'pulse-mobile-audit-v3',
       exportedAt: new Date().toISOString(),
+      operatorProfile,
       recordCount: operations.length,
+      chainVerification: chainVerification ?? null,
       operations,
     },
     null,
@@ -39,12 +48,29 @@ export function formatOperationsAsJson(operations: FieldOperation[]): string {
 }
 
 /**
- * Serializes field operations with full SHA-256 hashes and GPS telemetry into RFC-4180 CSV.
+ * Serializes field operations with SHA-256 chain links, operator identity, GPS, and photo evidence metadata into RFC-4180 CSV.
  */
-export function formatOperationsAsCsv(operations: FieldOperation[]): string {
+export function formatOperationsAsCsv(
+  operations: FieldOperation[],
+  chainVerification?: LedgerIntegrityReport
+): string {
+  const statusMap = new Map<string, string>();
+  if (chainVerification) {
+    for (const entry of chainVerification.records) {
+      statusMap.set(entry.id, entry.valid ? 'VERIFIED' : 'TAMPER_DETECTED');
+    }
+  }
+
   const headers = [
     'id',
     'code',
+    'chainIndex',
+    'chainStatus',
+    'prevHash',
+    'integrityHash',
+    'operatorId',
+    'operatorCallsign',
+    'operatorUnit',
     'title',
     'category',
     'priority',
@@ -54,9 +80,10 @@ export function formatOperationsAsCsv(operations: FieldOperation[]): string {
     'accuracyMeters',
     'coordinateSource',
     'checkpointId',
+    'photoEvidenceUri',
+    'photoResolution',
     'syncStatus',
     'syncMode',
-    'integrityHash',
     'payloadBytes',
     'latencyMs',
     'retryCount',
@@ -69,6 +96,13 @@ export function formatOperationsAsCsv(operations: FieldOperation[]): string {
     [
       op.id,
       op.code,
+      op.chainIndex,
+      statusMap.get(op.id) ?? 'UNVERIFIED',
+      op.prevHash,
+      op.integrityHash,
+      op.operatorProfile?.operatorId ?? '',
+      op.operatorProfile?.callsign ?? '',
+      op.operatorProfile?.unitSector ?? '',
       op.title,
       op.category,
       op.priority,
@@ -78,9 +112,10 @@ export function formatOperationsAsCsv(operations: FieldOperation[]): string {
       op.coordinates.accuracyMeters,
       op.coordinates.source,
       op.checkpointId ?? '',
+      op.photoEvidence?.uri ?? '',
+      op.photoEvidence ? `${op.photoEvidence.width}x${op.photoEvidence.height}` : '',
       op.syncStatus,
       op.syncMode ?? '',
-      op.integrityHash,
       op.payloadBytes,
       op.latencyMs ?? '',
       op.retryCount,
@@ -96,23 +131,29 @@ export function formatOperationsAsCsv(operations: FieldOperation[]): string {
 }
 
 /**
- * Writes and shares/downloads the complete audit ledger via expo-file-system + expo-sharing or Web Blob.
+ * Verifies the SHA-256 hash chain and exports/shares the full audit trail via expo-file-system + expo-sharing or Web download.
  */
 export async function exportOperationsAudit(
   operations: FieldOperation[],
-  format: AuditExportFormat
+  format: AuditExportFormat,
+  operatorProfile: OperatorProfile = DEFAULT_OPERATOR_PROFILE
 ): Promise<ExportAuditResult> {
+  const integrityReport = await verifyLedgerIntegrity(operations);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `pulse-audit-${timestamp}.${format}`;
   const mimeType = format === 'json' ? 'application/json' : 'text/csv';
   const content =
     format === 'json'
-      ? formatOperationsAsJson(operations)
-      : formatOperationsAsCsv(operations);
+      ? formatOperationsAsJson(operations, integrityReport, operatorProfile)
+      : formatOperationsAsCsv(operations, integrityReport);
 
   if (Platform.OS === 'web') {
     try {
-      if (typeof document !== 'undefined' && typeof Blob !== 'undefined' && typeof URL !== 'undefined') {
+      if (
+        typeof document !== 'undefined' &&
+        typeof Blob !== 'undefined' &&
+        typeof URL !== 'undefined'
+      ) {
         const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
@@ -126,6 +167,7 @@ export async function exportOperationsAudit(
           ok: true,
           filename,
           recordCount: operations.length,
+          chainStatus: integrityReport.status,
           method: 'WEB_DOWNLOAD',
         };
       }
@@ -134,6 +176,7 @@ export async function exportOperationsAudit(
         ok: false,
         filename,
         recordCount: operations.length,
+        chainStatus: integrityReport.status,
         method: 'WEB_DOWNLOAD',
         error: err instanceof Error ? err.message : 'Browser export failed.',
       };
@@ -156,6 +199,7 @@ export async function exportOperationsAudit(
         ok: true,
         filename,
         recordCount: operations.length,
+        chainStatus: integrityReport.status,
         method: 'NATIVE_SHARE',
       };
     }
@@ -164,6 +208,7 @@ export async function exportOperationsAudit(
       ok: true,
       filename,
       recordCount: operations.length,
+      chainStatus: integrityReport.status,
       method: 'MEMORY_ONLY',
       error: 'File written to cache, but native sharing sheet is unavailable on this device.',
     };
@@ -172,6 +217,7 @@ export async function exportOperationsAudit(
       ok: false,
       filename,
       recordCount: operations.length,
+      chainStatus: integrityReport.status,
       method: 'NATIVE_SHARE',
       error: err instanceof Error ? err.message : 'Audit export failed.',
     };

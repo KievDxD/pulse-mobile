@@ -10,20 +10,34 @@ import {
   ShieldCheck,
   WifiOff,
 } from 'lucide-react-native';
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { OperationCard } from '../../src/components/OperationCard';
+import { OperationInspectorModal } from '../../src/components/OperationInspectorModal';
+import {
+  LedgerIntegrityReport,
+  verifyLedgerIntegrity,
+} from '../../src/services/ledgerIntegrity';
 import { isValidHttpEndpoint } from '../../src/services/syncClient';
 import { usePulseStore } from '../../src/store/usePulseStore';
 import { useAdaptiveLayout } from '../../src/theme/adaptive';
 import { COLORS } from '../../src/theme/colors';
 import { triggerHaptic } from '../../src/utils/haptics';
 
+function chunkIntoRows<T>(items: T[], columns: number): T[][] {
+  const rows: T[][] = [];
+  for (let i = 0; i < items.length; i += columns) {
+    rows.push(items.slice(i, i + columns));
+  }
+  return rows;
+}
+
 export default function CommandScreen() {
   const router = useRouter();
   const layout = useAdaptiveLayout();
 
   const operations = usePulseStore((s) => s.operations);
+  const operatorProfile = usePulseStore((s) => s.operatorProfile);
   const networkMode = usePulseStore((s) => s.networkMode);
   const networkInfo = usePulseStore((s) => s.networkInfo);
   const syncEndpointUrl = usePulseStore((s) => s.syncEndpointUrl);
@@ -32,11 +46,33 @@ export default function CommandScreen() {
   const syncQueue = usePulseStore((s) => s.syncQueue);
   const retryOperation = usePulseStore((s) => s.retryOperation);
 
-  const estimatedWidth =
-    Math.min(layout.width, layout.maxContentWidth) -
-    layout.safePadding.left -
-    layout.safePadding.right;
-  const [contentWidth, setContentWidth] = useState<number>(Math.max(260, estimatedWidth));
+  const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
+  const [chainReport, setChainReport] = useState<LedgerIntegrityReport | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void verifyLedgerIntegrity(operations).then((report) => {
+      if (active) setChainReport(report);
+    });
+    return () => {
+      active = false;
+    };
+  }, [operations]);
+
+  const brokenSet = useMemo(
+    () => new Set(chainReport?.brokenRecordIds ?? []),
+    [chainReport]
+  );
+
+  const selectedOperation = useMemo(
+    () => operations.find((op) => op.id === selectedOperationId) ?? null,
+    [operations, selectedOperationId]
+  );
+
+  const selectedVerification = useMemo(() => {
+    if (!selectedOperation || !chainReport) return undefined;
+    return chainReport.records.find((r) => r.id === selectedOperation.id);
+  }, [selectedOperation, chainReport]);
 
   const syncedOps = operations.filter((op) => op.syncStatus === 'SYNCED_CLOUD');
   const queuedOps = operations.filter(
@@ -54,16 +90,17 @@ export default function CommandScreen() {
 
   const syncRatio = operations.length > 0 ? syncedOps.length / operations.length : 1;
 
-  const kpiColumns = layout.columns === 1 ? 2 : layout.columns === 2 ? 3 : 6;
+  const kpiColumns = layout.isPhoneLandscape
+    ? 3
+    : layout.columns === 1
+    ? 2
+    : layout.columns === 2
+    ? 3
+    : 6;
   const kpiGap = layout.gutter;
-  const kpiCardWidth = Math.floor((contentWidth - kpiGap * (kpiColumns - 1)) / kpiColumns);
 
   const feedColumns = layout.columns;
   const feedGap = layout.gutter;
-  const feedCardWidth =
-    feedColumns === 1
-      ? contentWidth
-      : Math.floor((contentWidth - feedGap * (feedColumns - 1)) / feedColumns);
 
   const handleManualSync = async () => {
     if (networkMode === 'OFFLINE') {
@@ -102,6 +139,15 @@ export default function CommandScreen() {
     ? `HTTP API (${syncEndpointUrl})`
     : 'LOCAL SHA-256 TRANSACTIONAL LEDGER';
 
+  const chainKpiValue =
+    chainReport?.status === 'TAMPER_DETECTED'
+      ? 'TAMPERED'
+      : chainReport?.status === 'VERIFIED_CHAIN'
+      ? 'VERIFIED'
+      : 'READY';
+  const chainKpiColor =
+    chainReport?.status === 'TAMPER_DETECTED' ? COLORS.critical : COLORS.online;
+
   const kpis = [
     {
       label: 'TOTAL OPS',
@@ -134,30 +180,28 @@ export default function CommandScreen() {
       icon: RefreshCw,
     },
     {
-      label: 'SHA-256 AUDIT',
-      value: operations.length > 0 ? 'VERIFIED' : 'READY',
-      color: COLORS.online,
+      label: 'HASH CHAIN',
+      value: chainKpiValue,
+      color: chainKpiColor,
       icon: ShieldCheck,
     },
   ];
 
+  const kpiRows = chunkIntoRows(kpis, kpiColumns);
+  const feedRows = chunkIntoRows(operations, feedColumns);
+
   return (
-    <ScrollView
-      style={styles.root}
-      contentContainerStyle={{
-        paddingTop: layout.spacing.md,
-        paddingBottom: layout.scrollBottomPadding,
-        paddingLeft: layout.safePadding.left,
-        paddingRight: layout.safePadding.right,
-      }}
-    >
-      <View
-        style={[styles.container, { maxWidth: layout.maxContentWidth }]}
-        onLayout={(e) => {
-          const measured = Math.floor(e.nativeEvent.layout.width);
-          if (measured > 0 && Math.abs(measured - contentWidth) > 2) {
-            setContentWidth(measured);
-          }
+    <View style={styles.root}>
+      <ScrollView
+        style={styles.root}
+        showsVerticalScrollIndicator
+        contentContainerStyle={{
+          flexGrow: 1,
+          gap: 14,
+          paddingTop: layout.spacing.md,
+          paddingBottom: layout.scrollBottomPadding,
+          paddingLeft: layout.contentPaddingLeft,
+          paddingRight: layout.contentPaddingRight,
         }}
       >
         <View style={styles.sectionHeader}>
@@ -165,217 +209,249 @@ export default function CommandScreen() {
             Operational Command
           </Text>
           <Text style={styles.sectionMeta} numberOfLines={1}>
-            {layout.columns} COL • {layout.breakpoint.toUpperCase()}
+            {operatorProfile.callsign} • {operatorProfile.unitSector}
           </Text>
         </View>
 
-        <View style={[styles.kpiGrid, { gap: kpiGap }]}>
-          {kpis.map((kpi) => {
-            const Icon = kpi.icon;
-            return (
+        <View style={{ gap: kpiGap }}>
+          {kpiRows.map((row, rowIdx) => (
+            <View key={`kpi-row-${rowIdx}`} style={{ flexDirection: 'row', gap: kpiGap }}>
+              {row.map((kpi) => {
+                const Icon = kpi.icon;
+                return (
+                  <View
+                    key={kpi.label}
+                    style={[
+                      styles.kpiCard,
+                      {
+                        flex: 1,
+                        minWidth: 0,
+                        padding: layout.cardPadding,
+                      },
+                    ]}
+                  >
+                    <View style={styles.kpiTop}>
+                      <Text style={styles.kpiLabel} numberOfLines={1}>
+                        {kpi.label}
+                      </Text>
+                      <Icon size={14} color={kpi.color} />
+                    </View>
+                    <Text
+                      style={[
+                        styles.kpiValue,
+                        { color: kpi.color, fontSize: layout.typography.title },
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {kpi.value}
+                    </Text>
+                  </View>
+                );
+              })}
+              {row.length < kpiColumns
+                ? Array.from({ length: kpiColumns - row.length }).map((_, padIdx) => (
+                    <View key={`kpi-pad-${padIdx}`} style={{ flex: 1 }} />
+                  ))
+                : null}
+            </View>
+          ))}
+        </View>
+
+          {/* Sync Engine Status Card */}
+          <View style={[styles.engineCard, { padding: layout.cardPadding }]}>
+            <View style={styles.engineTop}>
+              <View style={styles.engineTitleRow}>
+                <View style={[styles.engineDot, { backgroundColor: engineColor }]} />
+                <Text style={styles.engineTitle} numberOfLines={1}>
+                  OFFLINE-FIRST SYNC ENGINE
+                </Text>
+              </View>
               <View
-                key={kpi.label}
                 style={[
-                  styles.kpiCard,
+                  styles.enginePill,
                   {
-                    width: kpiCardWidth,
-                    padding: layout.cardPadding,
+                    borderColor:
+                      networkMode === 'OFFLINE' ? COLORS.offlineBorder : COLORS.onlineBorder,
+                    backgroundColor:
+                      networkMode === 'OFFLINE' ? COLORS.offlineBg : COLORS.onlineBg,
                   },
                 ]}
               >
-                <View style={styles.kpiTop}>
-                  <Text style={styles.kpiLabel} numberOfLines={1}>
-                    {kpi.label}
-                  </Text>
-                  <Icon size={14} color={kpi.color} />
-                </View>
-                <Text
-                  style={[
-                    styles.kpiValue,
-                    { color: kpi.color, fontSize: layout.typography.title },
-                  ]}
-                  numberOfLines={1}
-                >
-                  {kpi.value}
+                <Text style={[styles.enginePillText, { color: engineColor }]} numberOfLines={1}>
+                  {engineStateLabel}
                 </Text>
               </View>
-            );
-          })}
-        </View>
+            </View>
 
-        {/* Sync Engine Status Card */}
-        <View style={[styles.engineCard, { padding: layout.cardPadding }]}>
-          <View style={styles.engineTop}>
-            <View style={styles.engineTitleRow}>
-              <View style={[styles.engineDot, { backgroundColor: engineColor }]} />
-              <Text style={styles.engineTitle} numberOfLines={1}>
-                OFFLINE-FIRST SYNC ENGINE
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${Math.round(syncRatio * 100)}%`,
+                    backgroundColor: queuedOps.length === 0 ? COLORS.online : COLORS.offline,
+                  },
+                ]}
+              />
+            </View>
+
+            <View style={styles.engineStatsRow}>
+              <Text style={styles.engineStat} numberOfLines={1}>
+                LINK: {networkInfo.type}
+                {networkInfo.ipAddress ? ` (${networkInfo.ipAddress})` : ''}
+              </Text>
+              <Text style={styles.engineStat} numberOfLines={1}>
+                LAST ACK: {lastSyncAt ? lastSyncAt.slice(11, 19) + ' UTC' : 'NONE'}
               </Text>
             </View>
-            <View
-              style={[
-                styles.enginePill,
-                {
-                  borderColor:
-                    networkMode === 'OFFLINE' ? COLORS.offlineBorder : COLORS.onlineBorder,
-                  backgroundColor:
-                    networkMode === 'OFFLINE' ? COLORS.offlineBg : COLORS.onlineBg,
-                },
-              ]}
-            >
-              <Text style={[styles.enginePillText, { color: engineColor }]} numberOfLines={1}>
-                {engineStateLabel}
-              </Text>
-            </View>
-          </View>
 
-          <View style={styles.progressTrack}>
-            <View
-              style={[
-                styles.progressFill,
-                {
-                  width: `${Math.round(syncRatio * 100)}%`,
-                  backgroundColor: queuedOps.length === 0 ? COLORS.online : COLORS.offline,
-                },
-              ]}
-            />
-          </View>
-
-          <View style={styles.engineStatsRow}>
-            <Text style={styles.engineStat} numberOfLines={1}>
-              LINK: {networkInfo.type}
-              {networkInfo.ipAddress ? ` (${networkInfo.ipAddress})` : ''}
+            <Text style={styles.transportLine} numberOfLines={2}>
+              TARGET: {transportTarget}
             </Text>
-            <Text style={styles.engineStat} numberOfLines={1}>
-              LAST ACK: {lastSyncAt ? lastSyncAt.slice(11, 19) + ' UTC' : 'NONE'}
-            </Text>
-          </View>
 
-          <Text style={styles.transportLine} numberOfLines={2}>
-            TARGET: {transportTarget}
-          </Text>
-
-          {networkMode === 'OFFLINE' ? (
-            <View style={styles.offlineCallout}>
-              <WifiOff size={15} color={COLORS.offline} />
-              <Text style={styles.offlineCalloutText}>
-                Device connectivity lost / Airplane Mode active. Captured reports are sealed with
-                SHA-256 and buffered locally until OS connectivity restores.
-              </Text>
-            </View>
-          ) : null}
-
-          <View style={[styles.ctaRow, layout.isCompact && styles.ctaColumn]}>
-            <Pressable
-              onPress={handleManualSync}
-              disabled={isSyncing || queuedOps.length === 0}
-              accessibilityRole="button"
-              accessibilityLabel="Sync Pending Queue Now"
-              style={({ pressed }) => [
-                styles.primaryButton,
-                {
-                  minHeight: layout.minTouchTarget,
-                  flex: layout.isCompact ? undefined : 1,
-                  opacity: pressed || isSyncing || queuedOps.length === 0 ? 0.65 : 1,
-                },
-              ]}
-            >
-              <RefreshCw size={16} color={COLORS.primaryText} />
-              <Text style={styles.primaryButtonText} numberOfLines={1}>
-                {networkMode === 'OFFLINE'
-                  ? 'OFFLINE — AUTO-SYNC ON RECONNECT'
-                  : isSyncing
-                  ? 'SYNCING QUEUE...'
-                  : `SYNC QUEUE (${queuedOps.length})`}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={async () => {
-                await triggerHaptic('light');
-                router.push('/(tabs)/capture');
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Capture Field Report"
-              style={({ pressed }) => [
-                styles.secondaryButton,
-                {
-                  minHeight: layout.minTouchTarget,
-                  opacity: pressed ? 0.8 : 1,
-                },
-              ]}
-            >
-              <Plus size={16} color={COLORS.textPrimary} />
-              <Text style={styles.secondaryButtonText} numberOfLines={1}>
-                CAPTURE REPORT
-              </Text>
-            </Pressable>
-          </View>
-        </View>
-
-        {/* Field Operations Feed or Clean Empty State */}
-        <View style={styles.sectionHeader}>
-          <Text style={[styles.sectionTitle, { fontSize: layout.typography.subtitle }]} numberOfLines={1}>
-            Field Operations Ledger
-          </Text>
-          {operations.length > 0 ? (
-            <Pressable
-              onPress={() => router.push('/(tabs)/queue')}
-              style={{ minHeight: layout.minTouchTarget, justifyContent: 'center' }}
-            >
-              <Text style={styles.linkText} numberOfLines={1}>
-                AUDIT QUEUE →
-              </Text>
-            </Pressable>
-          ) : null}
-        </View>
-
-        {operations.length === 0 ? (
-          <View style={[styles.emptyCard, { padding: layout.cardPadding + 8 }]}>
-            <Compass size={28} color={COLORS.textSecondary} />
-            <Text style={styles.emptyTitle}>No Field Operations Recorded</Text>
-            <Text style={styles.emptySubtitle}>
-              Your local queue and verified ledger are clean. Capture your first real inspection
-              using hardware GPS telemetry, QR camera scanning, and SHA-256 sealing.
-            </Text>
-            <Pressable
-              onPress={async () => {
-                await triggerHaptic('medium');
-                router.push('/(tabs)/capture');
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Capture First Field Report"
-              style={({ pressed }) => [
-                styles.primaryButton,
-                {
-                  minHeight: layout.minTouchTarget,
-                  paddingHorizontal: 18,
-                  marginTop: 6,
-                  opacity: pressed ? 0.85 : 1,
-                },
-              ]}
-            >
-              <Plus size={16} color={COLORS.primaryText} />
-              <Text style={styles.primaryButtonText} numberOfLines={1}>
-                CAPTURE FIRST FIELD REPORT
-              </Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={[styles.feedGrid, { gap: feedGap }]}>
-            {operations.map((op) => (
-              <View key={op.id} style={{ width: feedCardWidth }}>
-                <OperationCard
-                  operation={op}
-                  compact={layout.isCompact}
-                  onRetry={handleRetryItem}
-                />
+            {networkMode === 'OFFLINE' ? (
+              <View style={styles.offlineCallout}>
+                <WifiOff size={15} color={COLORS.offline} />
+                <Text style={styles.offlineCalloutText}>
+                  Device connectivity lost / Airplane Mode active. Captured reports are sealed in
+                  the local SHA-256 hash chain until OS connectivity restores.
+                </Text>
               </View>
-            ))}
+            ) : null}
+
+            <View style={[styles.ctaRow, layout.isCompact && styles.ctaColumn]}>
+              <Pressable
+                onPress={handleManualSync}
+                disabled={isSyncing || queuedOps.length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="Sync Pending Queue Now"
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  {
+                    minHeight: layout.minTouchTarget,
+                    flex: layout.isCompact ? undefined : 1,
+                    opacity: pressed || isSyncing || queuedOps.length === 0 ? 0.65 : 1,
+                  },
+                ]}
+              >
+                <RefreshCw size={16} color={COLORS.primaryText} />
+                <Text style={styles.primaryButtonText} numberOfLines={1}>
+                  {networkMode === 'OFFLINE'
+                    ? 'OFFLINE — AUTO-SYNC ON RECONNECT'
+                    : isSyncing
+                    ? 'SYNCING QUEUE...'
+                    : `SYNC QUEUE (${queuedOps.length})`}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={async () => {
+                  await triggerHaptic('light');
+                  router.push('/(tabs)/capture');
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Capture Field Report"
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  {
+                    minHeight: layout.minTouchTarget,
+                    opacity: pressed ? 0.8 : 1,
+                  },
+                ]}
+              >
+                <Plus size={16} color={COLORS.textPrimary} />
+                <Text style={styles.secondaryButtonText} numberOfLines={1}>
+                  CAPTURE REPORT
+                </Text>
+              </Pressable>
+            </View>
           </View>
-        )}
-      </View>
-    </ScrollView>
+
+          {/* Field Operations Feed or Clean Empty State */}
+          <View style={styles.sectionHeader}>
+            <Text style={[styles.sectionTitle, { fontSize: layout.typography.subtitle }]} numberOfLines={1}>
+              Field Operations Ledger
+            </Text>
+            {operations.length > 0 ? (
+              <Pressable
+                onPress={() => router.push('/(tabs)/queue')}
+                style={{ minHeight: layout.minTouchTarget, justifyContent: 'center' }}
+              >
+                <Text style={styles.linkText} numberOfLines={1}>
+                  AUDIT CHAIN →
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+
+          {operations.length === 0 ? (
+            <View style={[styles.emptyCard, { padding: layout.cardPadding + 8 }]}>
+              <Compass size={28} color={COLORS.textSecondary} />
+              <Text style={styles.emptyTitle}>No Field Operations Recorded</Text>
+              <Text style={styles.emptySubtitle}>
+                Your tamper-evident ledger is clean. Capture your first real inspection with
+                hardware GPS telemetry, photo evidence, QR scan, and SHA-256 chain sealing.
+              </Text>
+              <Pressable
+                onPress={async () => {
+                  await triggerHaptic('medium');
+                  router.push('/(tabs)/capture');
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Capture First Field Report"
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  {
+                    minHeight: layout.minTouchTarget,
+                    paddingHorizontal: 18,
+                    marginTop: 6,
+                    opacity: pressed ? 0.85 : 1,
+                  },
+                ]}
+              >
+                <Plus size={16} color={COLORS.primaryText} />
+                <Text style={styles.primaryButtonText} numberOfLines={1}>
+                  CAPTURE FIRST FIELD REPORT
+                </Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={{ gap: feedGap }}>
+              {feedRows.map((row, rowIdx) => (
+                <View key={`feed-row-${rowIdx}`} style={{ flexDirection: 'row', gap: feedGap }}>
+                  {row.map((op) => (
+                    <View key={op.id} style={{ flex: 1, minWidth: 0 }}>
+                      <OperationCard
+                        operation={op}
+                        compact={layout.isCompact}
+                        chainValid={!brokenSet.has(op.id)}
+                        onPress={async (item) => {
+                          await triggerHaptic('light');
+                          setSelectedOperationId(item.id);
+                        }}
+                        onRetry={handleRetryItem}
+                      />
+                    </View>
+                  ))}
+                  {row.length < feedColumns
+                    ? Array.from({ length: feedColumns - row.length }).map((_, padIdx) => (
+                        <View key={`feed-pad-${padIdx}`} style={{ flex: 1 }} />
+                      ))
+                    : null}
+                </View>
+              ))}
+            </View>
+          )}
+      </ScrollView>
+
+      <OperationInspectorModal
+        operation={selectedOperation}
+        chainValid={selectedVerification?.valid ?? true}
+        chainReason={selectedVerification?.reason}
+        onClose={() => setSelectedOperationId(null)}
+        onRetry={handleRetryItem}
+      />
+    </View>
   );
 }
 
@@ -383,11 +459,6 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: COLORS.background,
-  },
-  container: {
-    width: '100%',
-    alignSelf: 'center',
-    gap: 14,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -413,10 +484,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.6,
-  },
-  kpiGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
   },
   kpiCard: {
     backgroundColor: COLORS.card,
@@ -595,9 +662,5 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     textAlign: 'center',
     maxWidth: 420,
-  },
-  feedGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
   },
 });
